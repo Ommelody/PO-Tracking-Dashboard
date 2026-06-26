@@ -86,10 +86,12 @@
   function get(row,map,name){ const i=map[name]; return i==null?undefined:row[i]; }
 
   // ---------- aggregation ----------
-  function buildDataset(po, gr, opts){
+  function buildDataset(po, gr, ap, opts){
+    if(ap && !ap.headerMap && !opts){ opts=ap; ap=null; } // allow buildDataset(po,gr,opts)
     opts=opts||{};
     const TODAY = opts.today!=null ? opts.today : (function(){ const d=new Date(); return d.getFullYear()*10000+(d.getMonth()+1)*100+d.getDate(); })();
     const PH=po.headerMap, GH=gr.headerMap;
+    const apProvided = !!(ap && ap.rows && ap.rows.length);
     const person=(row,map)=>{ const f=(get(row,map,'First Name')||'').trim(); const l=(get(row,map,'Last Name')||'').trim(); return (f+' '+l).trim(); };
 
     // GR aggregate by PO ref + GR docs
@@ -105,6 +107,28 @@
     const grDocArr=Object.values(grDocs);
     const grOpen=grDocArr.filter(g=>g.status==='Open').length, grClosed=grDocArr.filter(g=>g.status==='Closed').length;
 
+    // A/P Invoice aggregate (links to GR via Base Document Reference, or to PO directly)
+    const apByGR={}, apByPO={}, apDocs={};
+    if(apProvided){
+      const AH=ap.headerMap;
+      for(const r of ap.rows){
+        const doc=get(r,AH,'Document Number'); if(!doc) continue;
+        const baseType=(get(r,AH,'Base Document Type')||'');
+        const ref=get(r,AH,'Base Document Reference');
+        const val=num(get(r,AH,'Gross Total')); const st=get(r,AH,'Document Status'); const date=get(r,AH,'Posting Date')||'';
+        if(!apDocs[doc]) apDocs[doc]={status:st,date,val:0};
+        apDocs[doc].val+=val;
+        const tgt = /goods receipt/i.test(baseType)? apByGR : /purchase order/i.test(baseType)? apByPO : null;
+        if(tgt && ref){ const e=tgt[ref]||(tgt[ref]={docs:new Set(),val:0,list:[]}); e.val+=val;
+          if(!e.docs.has(doc)){ e.docs.add(doc); e.list.push({d:doc,date,st}); } }
+      }
+    }
+    const apDocArr=Object.entries(apDocs).map(([d,o])=>({d,...o}));
+    const totalAP=apDocArr.length;
+    const apValue=Math.round(apDocArr.reduce((s,x)=>s+x.val,0));
+    const apOpen=apDocArr.filter(a=>a.status==='Open').length, apClosed=apDocArr.filter(a=>a.status==='Closed').length;
+    let grInvoiced=0; for(const k in grDocs){ if(apByGR[k]) grInvoiced++; }
+
     // PO aggregate by document
     const poMap={};
     for(const r of po.rows){
@@ -116,7 +140,7 @@
         dept:get(r,PH,'Department')||'',wh:get(r,PH,'Warehouse Code')||'',
         remark:get(r,PH,'Remark')||'',person:person(r,PH),lines:0,qty:0,openQty:0,val:0,items:[]}; poMap[doc]=p; }
       p.lines++;
-      const q=num(get(r,PH,'Quantity')),oq=num(get(r,PH,'Remaining Open Quantity')),gt=num(get(r,PH,'Gross Total'));
+      const q=num(get(r,PH,'Quantity')),oq2=num(get(r,PH,'Remaining Open Quantity')),gt=num(get(r,PH,'Gross Total')); var oq=oq2;
       p.qty+=q; p.openQty+=oq; p.val+=gt;
       p.items.push({no:get(r,PH,'Item No.'),desc:(get(r,PH,'Item/Service Description')||'').slice(0,60),
         qty:q,open:oq,unit:get(r,PH,'Unit'),price:Math.round(num(get(r,PH,'Gross Price'))),total:Math.round(gt)});
@@ -126,7 +150,13 @@
     let cFull=0,cPartial=0,cAwait=0,cOverdue=0,valAwait=0,totalValue=0;
     for(const p of pos){
       const gx=grByPO[p.doc];
-      p.grDocs=gx?gx.docs.size:0; p.grList=gx?gx.list.slice(0,10):[]; p.grVal=gx?Math.round(gx.val):0;
+      p.grDocs=gx?gx.docs.size:0; p.grVal=gx?Math.round(gx.val):0;
+      p.grList=gx? gx.list.slice(0,10).map(g=>Object.assign({},g,{inv: apByGR[g.d]? apByGR[g.d].docs.size:0})) : [];
+      // linked invoices (via this PO's GRs, plus invoices based directly on the PO)
+      const apl=[], apset=new Set();
+      (gx? gx.list : []).forEach(g=>{ const e=apByGR[g.d]; if(e) e.list.forEach(iv=>{ if(!apset.has(iv.d)){ apset.add(iv.d); apl.push(iv); } }); });
+      const direct=apByPO[p.doc]; if(direct) direct.list.forEach(iv=>{ if(!apset.has(iv.d)){ apset.add(iv.d); apl.push(iv); } });
+      p.apl=apl.slice(0,10); p.apCount=apset.size;
       p.recvPct=p.qty>0?Math.max(0,Math.min(100,Math.round((p.qty-p.openQty)/p.qty*100))):0;
       let st;
       if(p.status==='Closed'||p.openQty<=0.0001){ st='full'; cFull++; }
@@ -158,6 +188,7 @@
       totalPO:pos.length, totalGR:grDocArr.length, totalValue:Math.round(totalValue),
       track:{full:cFull,partial:cPartial,await:cAwait}, overdue:cOverdue, valAwait:Math.round(valAwait),
       grOpen, grClosed,
+      apProvided, totalAP, apValue, apOpen, apClosed, grInvoiced, grUninvoiced:(grDocArr.length-grInvoiced),
       byPrefix:topBy(p=>p.prefix,20), byDept:topBy(p=>p.dept,15), byVendor:topBy(p=>p.vname,15),
       byWh:topBy(p=>p.wh,12), byPerson:topBy(p=>p.person,15),
       monthly:months.map(m=>({m,...monthly[m]})), dateMin:fmtD(dmin), dateMax:fmtD(dmax)
@@ -167,19 +198,22 @@
       doc:p.doc, pf:p.prefix, st:p.status, tr:p.track, od:p.overdue?1:0,
       post:p.post, deliv:p.deliv, vc:p.vcode, vn:p.vname, dept:p.dept, wh:p.wh,
       pn:p.person||'', qty:p.qty, oq:p.openQty, rp:p.recvPct, val:p.val,
-      gd:p.grDocs, gv:p.grVal, ln:p.lines, rm:(p.remark||'').slice(0,90),
-      items:keep?p.items.slice(0,25):[], grl:p.grList
+      gd:p.grDocs, gv:p.grVal, ap:p.apCount||0, ln:p.lines, rm:(p.remark||'').slice(0,90),
+      items:keep?p.items.slice(0,25):[], grl:p.grList, apl:p.apl||[]
     };});
 
     return { summary, rows };
   }
 
-  async function fromFiles(poBlob, grBlob, opts){
+  async function fromFiles(poBlob, grBlob, apBlob, opts){
+    if(apBlob && !(apBlob instanceof Blob) && !(apBlob instanceof Uint8Array) && !opts){ opts=apBlob; apBlob=null; }
     const po=await parseWorkbook(poBlob);
     const gr=await parseWorkbook(grBlob);
     if(!po.headerMap['Document Number']) throw new Error('ไฟล์ PO ไม่พบคอลัมน์ Document Number');
     if(!gr.headerMap['Document Number']) throw new Error('ไฟล์ GR ไม่พบคอลัมน์ Document Number');
-    return buildDataset(po, gr, opts);
+    let ap=null;
+    if(apBlob){ ap=await parseWorkbook(apBlob); if(!ap.headerMap['Document Number']) throw new Error('ไฟล์ A/P Invoice ไม่พบคอลัมน์ Document Number'); }
+    return buildDataset(po, gr, ap, opts);
   }
 
   global.XLSXTrack = { unzip, parseWorkbook, buildDataset, fromFiles };
