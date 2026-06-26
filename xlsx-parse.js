@@ -101,7 +101,7 @@
       const q=num(get(r,GH,'Quantity')); const val=num(get(r,GH,'Gross Total'));
       if(ref){ const e=grByPO[ref]||(grByPO[ref]={q:0,val:0,docs:new Set(),list:[]}); e.q+=q; e.val+=val;
         if(!e.docs.has(doc)){ e.docs.add(doc); e.list.push({d:doc,date:get(r,GH,'Posting Date')||'',st:get(r,GH,'Document Status'),pn:person(r,GH)}); } }
-      if(!grDocs[doc]) grDocs[doc]={status:get(r,GH,'Document Status'),date:get(r,GH,'Posting Date')||'',val:0};
+      if(!grDocs[doc]) grDocs[doc]={status:get(r,GH,'Document Status'),date:get(r,GH,'Posting Date')||'',val:0,ref:ref||'',pn:person(r,GH)};
       grDocs[doc].val+=val;
     }
     const grDocArr=Object.values(grDocs);
@@ -170,6 +170,22 @@
       totalValue+=p.val;
     }
 
+    // GR-level lists for drill-down: รอตั้งหนี้ / ตั้งหนี้แล้วแต่ยังไม่ปิดเอกสาร
+    const grPending=[], grInvoicedOpen=[];
+    for(const doc in grDocs){
+      const g=grDocs[doc]; const invd=!!apByGR[doc];
+      const poRef=g.ref||''; const pp=poRef&&poMap[poRef]?poMap[poRef]:null;
+      const rec={ d:doc, date:g.date, st:g.status, po:poRef, vn:pp?pp.vname:'', dept:pp?pp.dept:'', wh:pp?pp.wh:'', pn:g.pn||'', val:Math.round(g.val), inv: invd?(apByGR[doc].docs.size):0,
+        apl: invd? apByGR[doc].list.slice(0,6).map(iv=>({d:iv.d,date:iv.date,st:iv.st})) : [] };
+      if(!invd){ grPending.push(rec); }
+      else {
+        const openInv=apByGR[doc].list.filter(iv=>iv.st==='Open');
+        if(g.status==='Open' || openInv.length){ rec.openInv=openInv.length; rec.grOpen=(g.status==='Open')?1:0; grInvoicedOpen.push(rec); }
+      }
+    }
+    const byDateDesc=(a,b)=>dnum(b.date)-dnum(a.date);
+    grPending.sort(byDateDesc); grInvoicedOpen.sort(byDateDesc);
+
     // monthly trend
     const monthly={};
     for(const p of pos){ const k=ym(p.post); if(!k) continue; (monthly[k]=monthly[k]||{po:0,val:0,recv:0}).po++; monthly[k].val+=p.val; }
@@ -189,6 +205,7 @@
       track:{full:cFull,partial:cPartial,await:cAwait}, overdue:cOverdue, valAwait:Math.round(valAwait),
       grOpen, grClosed,
       apProvided, totalAP, apValue, apOpen, apClosed, grInvoiced, grUninvoiced:(grDocArr.length-grInvoiced),
+      grPendingCount:grPending.length, grInvoicedOpenCount:grInvoicedOpen.length,
       byPrefix:topBy(p=>p.prefix,20), byDept:topBy(p=>p.dept,15), byVendor:topBy(p=>p.vname,15),
       byWh:topBy(p=>p.wh,12), byPerson:topBy(p=>p.person,15),
       monthly:months.map(m=>({m,...monthly[m]})), dateMin:fmtD(dmin), dateMax:fmtD(dmax)
@@ -202,7 +219,7 @@
       items:keep?p.items.slice(0,25):[], grl:p.grList, apl:p.apl||[]
     };});
 
-    return { summary, rows };
+    return { summary, rows, grPending, grInvoicedOpen };
   }
 
   async function fromFiles(poBlob, grBlob, apBlob, opts){
