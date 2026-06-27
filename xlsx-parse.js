@@ -211,12 +211,12 @@
       monthly:months.map(m=>({m,...monthly[m]})), dateMin:fmtD(dmin), dateMax:fmtD(dmax)
     };
 
-    const rows=pos.map(p=>{ const keep=p.track!=='full'; return {
+    const rows=pos.map(p=>{ return {
       doc:p.doc, pf:p.prefix, st:p.status, tr:p.track, od:p.overdue?1:0,
       post:p.post, deliv:p.deliv, vc:p.vcode, vn:p.vname, dept:p.dept, wh:p.wh,
       pn:p.person||'', qty:p.qty, oq:p.openQty, rp:p.recvPct, val:p.val,
       gd:p.grDocs, gv:p.grVal, ap:p.apCount||0, ln:p.lines, rm:(p.remark||'').slice(0,90),
-      items:keep?p.items.slice(0,25):[], grl:p.grList, apl:p.apl||[]
+      items:p.items.slice(0,40), grl:p.grList, apl:p.apl||[]
     };});
 
     return { summary, rows, grPending, grInvoicedOpen };
