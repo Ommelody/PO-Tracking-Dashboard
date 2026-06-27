@@ -1,0 +1,748 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="po-data.js"></script>
+<script src="xlsx-parse.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+<script src="firebase-config.js"></script>
+<script src="firebase-store.js"></script>
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{background:#eef1f2;font-family:'IBM Plex Sans Thai',system-ui,sans-serif;color:#16242b;-webkit-font-smoothing:antialiased}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:#c2cdcf;border-radius:6px;border:2px solid #eef1f2}
+  ::-webkit-scrollbar-track{background:transparent}
+  select,input{font-family:inherit}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  @keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+  @keyframes overlayIn{from{opacity:0}to{opacity:1}}
+  @keyframes sheetIn{from{opacity:0;transform:translateY(18px) scale(.99)}to{opacity:1;transform:translateY(0) scale(1)}}
+  @media print {
+    body * { visibility:hidden !important; }
+    #print-report, #print-report * { visibility:visible !important; }
+    #print-report { position:absolute !important; left:0 !important; top:0 !important; width:100% !important; padding:0 !important; background:#fff !important; }
+    .no-print, .no-print * { visibility:hidden !important; display:none !important; }
+    .pr-row { page-break-inside:avoid; }
+    @page { size: A4 landscape; margin: 9mm; }
+  }
+</style>
+<template id="__bundler_thumbnail" data-bg-color="#0f7c80">
+  <svg viewBox="0 0 1200 800" xmlns="http://www.w3.org/2000/svg">
+    <rect width="1200" height="800" fill="#0f7c80"/>
+    <rect x="360" y="250" width="110" height="110" rx="22" fill="#ffffff"/>
+    <text x="415" y="328" font-family="monospace" font-size="58" font-weight="700" fill="#0f7c80" text-anchor="middle">PO</text>
+    <rect x="500" y="262" width="340" height="26" rx="13" fill="#ffffff"/>
+    <rect x="500" y="312" width="220" height="20" rx="10" fill="#bfe3e3"/>
+    <g fill="#bfe3e3">
+      <rect x="360" y="430" width="150" height="120" rx="14"/>
+      <rect x="525" y="430" width="150" height="120" rx="14"/>
+      <rect x="690" y="430" width="150" height="120" rx="14"/>
+    </g>
+    <g fill="#ffffff">
+      <rect x="380" y="470" width="70" height="40" rx="6"/>
+      <rect x="545" y="470" width="70" height="40" rx="6"/>
+      <rect x="710" y="470" width="70" height="40" rx="6"/>
+    </g>
+  </svg>
+</template>
+</helmet>
+<div id="root" style="min-height:100vh">{{ app }}</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1340,&quot;height&quot;:1800}}">
+class Component extends DCLogic {
+  state = {
+    ready:false, tab:'all', vw:0, filterOpen:false,
+    f:{ q:'', prefix:'', vendor:'', wh:'', dept:'', person:'', from:'', to:'' },
+    sortKey:'urgent', sortDir:1, page:0, perPage:25, sel:null,
+    upOpen:false, up:{ po:null, gr:null, ap:null, busy:false, err:'', stage:'', note:'' }, toast:'',
+    cloud:{ state:'init' }, docList:null, printOpen:false
+  };
+
+  componentDidMount(){
+    this._onResize=()=>{ if(this._raf) return; this._raf=requestAnimationFrame(()=>{ this._raf=null; const w=window.innerWidth; if(w!==this.state.vw) this.setState({vw:w}); }); };
+    window.addEventListener('resize',this._onResize);
+    const t=()=>{ if(window.PODATA){ this.D=window.PODATA; this.enrich(this.D); this.setState({ready:true,vw:window.innerWidth}); this.syncFromCloud(); } else setTimeout(t,60); };
+    t();
+  }
+  componentWillUnmount(){ if(this._onResize) window.removeEventListener('resize',this._onResize); }
+
+  // recompute overdue + days-overdue against the real current date (keeps the tracker live)
+  todayNum(){ const d=new Date(); return d.getFullYear()*10000+(d.getMonth()+1)*100+d.getDate(); }
+  overdueDays(deliv){ const p=String(deliv).split('.'); if(p.length!==3) return 0; const dt=new Date(2000+ +p[2], (+p[1])-1, +p[0]); const td=new Date(); td.setHours(0,0,0,0); return Math.max(0, Math.floor((td-dt)/86400000)); }
+  enrich(D){ if(!D||!D.rows) return; const tn=this.todayNum(); for(const r of D.rows){ if(r.tr!=='full' && this.dnum(r.deliv) && this.dnum(r.deliv)<tn){ r.od=1; r.odDays=this.overdueDays(r.deliv); } else { r.od=0; r.odDays=0; } } }
+  currentRows(){ const scope=this.scoped(); let rows=scope.filter(r=> this.state.tab==='all'?true : this.state.tab==='overdue'? r.od : r.tr===this.state.tab); return this.sortRows(rows); }
+  odBadge(r,big){ return React.createElement('span',{style:{padding:big?'3px 9px':'2px 7px',borderRadius:big?6:5,background:this.REDBG,color:this.RED,fontSize:big?11:10,fontWeight:600,whiteSpace:'nowrap'}}, (big?'เกินกำหนด':'เกิน')+(r.odDays?(' '+r.odDays+' วัน'):(big?'ส่ง':'กำหนด'))); }
+
+  // ---------- format helpers ----------
+  fmtN(n){ return Math.round(n||0).toLocaleString('en-US'); }
+  fmtM(n){ n=n||0; if(Math.abs(n)>=1e6) return (n/1e6).toFixed(1); if(Math.abs(n)>=1e3) return (n/1e3).toFixed(0)+'K'; return this.fmtN(n); }
+  unitM(n){ return Math.abs(n||0)>=1e6?'ล้านบาท':'บาท'; }
+  baht(n){ return '฿'+this.fmtN(n); }
+  dnum(s){ if(!s) return 0; const p=String(s).split('.'); if(p.length!==3) return 0; const[d,m,y]=p.map(Number); return (2000+y)*10000+m*100+d; }
+  fdate(s){ if(!s) return '—'; const p=String(s).split('.'); if(p.length!==3) return s; return p[0]+'/'+p[1]+'/'+(2000+Number(p[2])); }
+  inpNum(s){ return s? Number(s.replace(/-/g,'')) : 0; }
+
+  TRACK = {
+    full:{label:'รับครบแล้ว', c:'#2f8f6b', bg:'#e6f4ee'},
+    partial:{label:'รับบางส่วน', c:'#2273b0', bg:'#e4f0f8'},
+    await:{label:'รอรับของ', c:'#b8810f', bg:'#fbf1da'}
+  };
+  RED='#c5483b'; REDBG='#fbe9e7';
+  TEAL='#0f7c80'; INK='#16242b'; MUTE='#64777d'; LINE='#e2e8ea'; PANEL='#f7f9f9';
+
+  // ---------- responsive ----------
+  rp(){ const vw=this.state.vw||1200; return { vw, isMobile:vw<680, isTablet:vw>=680&&vw<1040, narrow:vw<1040, cardMode:vw<900 }; }
+
+  // ---------- filtering ----------
+  setTab(t){ this.setState({tab:t,page:0}); }
+  setSort(k){ this.setState(s=>({ sortKey:k, sortDir: s.sortKey===k? -s.sortDir : 1, page:0 })); }
+  setF(key,val){ this.setState(s=>({ f:Object.assign({},s.f,{[key]:val}), page:0 })); }
+  toggleF(key,val){ this.setState(s=>({ f:Object.assign({},s.f,{[key]: s.f[key]===val?'':val}), page:0 })); }
+  clearF(){ this.setState({ f:{q:'',prefix:'',vendor:'',wh:'',dept:'',person:'',from:'',to:''}, tab:'all', page:0 }); }
+  activeCount(){ const f=this.state.f; return ['prefix','vendor','wh','dept','person','from','to','q'].filter(k=>f[k]).length; }
+
+  scoped(except){
+    const f=this.state.f; const fromN=this.inpNum(f.from), toN=this.inpNum(f.to);
+    const qq=f.q.trim().toLowerCase();
+    return this.D.rows.filter(r=>{
+      if(except!=='prefix' && f.prefix && r.pf!==f.prefix) return false;
+      if(except!=='vendor' && f.vendor && r.vn!==f.vendor) return false;
+      if(except!=='wh' && f.wh && r.wh!==f.wh) return false;
+      if(except!=='dept' && f.dept && r.dept!==f.dept) return false;
+      if(except!=='person' && f.person && r.pn!==f.person) return false;
+      if(fromN||toN){ const d=this.dnum(r.post); if(!d) return false; if(fromN&&d<fromN) return false; if(toN&&d>toN) return false; }
+      if(qq){ const hay=(r.doc+' '+r.pf+' '+r.vn+' '+r.vc+' '+r.dept+' '+r.wh+' '+r.pn+' '+r.rm).toLowerCase();
+        if(!hay.includes(qq)){ if(!(r.items||[]).some(it=>(it.desc+' '+it.no).toLowerCase().includes(qq))) return false; } }
+      return true;
+    });
+  }
+  derive(rows){
+    let full=0,partial=0,aw=0,overdue=0,valAwait=0,totalValue=0,maxOd=0; const pm={};
+    for(const r of rows){
+      if(r.tr==='full') full++; else if(r.tr==='partial') partial++; else aw++;
+      if(r.od){ overdue++; if((r.odDays||0)>maxOd) maxOd=r.odDays; } totalValue+=r.val;
+      if(r.tr!=='full') valAwait += r.qty>0? r.val*(r.oq/r.qty):0;
+      const k=this.ymOf(r.post); if(k) pm[k]=(pm[k]||0)+1;
+    }
+    return { totalPO:rows.length, totalValue, track:{full,partial,await:aw}, overdue, overdueMaxDays:maxOd, valAwait, poByMonth:pm };
+  }
+  ymOf(s){ if(!s) return null; const p=String(s).split('.'); if(p.length!==3) return null; return (2000+Number(p[2]))+'-'+p[1]; }
+  breakdown(key,except,n){
+    const rows=this.scoped(except); const m={};
+    for(const r of rows){ const v=(key==='pf'?r.pf:key==='vn'?r.vn:key==='pn'?r.pn:r[key])||'(ไม่ระบุ)';
+      const e=m[v]||(m[v]={k:v,count:0,open:0,val:0}); e.count++; e.val+=r.val; if(r.tr!=='full') e.open++; }
+    return Object.values(m).sort((a,b)=>b.count-a.count).slice(0,n||999);
+  }
+  options(key){ if(!this._opt) this._opt={}; if(this._opt[key]) return this._opt[key];
+    const m={}; for(const r of this.D.rows){ const v=(key==='pf'?r.pf:key==='vn'?r.vn:key==='pn'?r.pn:r[key]); if(v) m[v]=(m[v]||0)+1; }
+    const arr=Object.entries(m).sort((a,b)=>b[1]-a[1]).map(([k])=>k); this._opt[key]=arr; return arr;
+  }
+
+  // ---------- root ----------
+  renderVals(){
+    if(!this.state.ready) return { app:this.loading() };
+    const h=React.createElement; const R=this.rp(); this.R=R;
+    const scope=this.scoped(); const M=this.derive(scope);
+    this._scopedDocSet = new Set(scope.map(r=>r.doc));
+    return { app: h('div',{style:{maxWidth:1340,margin:'0 auto',padding:R.isMobile?'0 12px 44px':'0 28px 64px'}},
+      this.header(), this.filterBar(scope.length), this.kpis(M), this.pipeline(),
+      this.attentionStrip(),
+      this.charts(M), this.prefixSection(), this.peopleVendor(), this.tableSection(scope),
+      this.state.sel!=null ? this.modal() : null,
+      this.state.docList ? this.docListModal() : null,
+      this.state.printOpen ? this.printReport() : null,
+      this.state.upOpen ? this.uploadModal() : null,
+      this.state.toast ? this.toastEl() : null
+    )};
+  }
+  loading(){ const h=React.createElement;
+    return h('div',{style:{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',height:'100vh',gap:18,color:this.MUTE}},
+      h('div',{style:{width:38,height:38,borderRadius:'50%',border:'3px solid #d4dee0',borderTopColor:this.TEAL,animation:'spin .8s linear infinite'}}),
+      h('div',{style:{fontSize:14}},'กำลังโหลดข้อมูลใบสั่งซื้อ…')); }
+  card(children,extra){ return React.createElement('div',{style:Object.assign({background:'#fff',border:'1px solid '+this.LINE,borderRadius:14,boxShadow:'0 1px 2px rgba(20,40,50,.04)'},extra||{})}, children); }
+  secTitle(t,right){ return React.createElement('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,marginBottom:14,flexWrap:'wrap'}},
+    React.createElement('div',{style:{fontSize:11.5,fontWeight:600,letterSpacing:1,color:this.MUTE,textTransform:'uppercase'}},t), right||null); }
+
+  // ---------- header ----------
+  header(){
+    const h=React.createElement; const s=this.D.summary; const R=this.R;
+    return h('div',{style:{display:'flex',alignItems:R.isMobile?'stretch':'flex-end',flexDirection:R.isMobile?'column':'row',justifyContent:'space-between',gap:R.isMobile?14:24,flexWrap:'wrap',padding:R.isMobile?'20px 0 14px':'30px 0 18px'}},
+      h('div',null,
+        h('div',{style:{display:'flex',alignItems:'center',gap:11,marginBottom:8}},
+          h('div',{style:{width:34,height:34,borderRadius:9,background:this.TEAL,display:'flex',alignItems:'center',justifyContent:'center',color:'#fff',fontWeight:700,fontSize:17,fontFamily:"'IBM Plex Mono',monospace"}},'PO'),
+          h('div',{style:{fontSize:12,fontWeight:600,letterSpacing:1.5,color:this.TEAL,textTransform:'uppercase'}},'Purchase Order Tracking')),
+        h('h1',{style:{margin:0,fontSize:R.isMobile?22:27,fontWeight:700,letterSpacing:-.3,lineHeight:1.15}},'ระบบติดตามสถานะใบสั่งซื้อ'),
+        h('div',{style:{marginTop:6,fontSize:R.isMobile?12.5:13.5,color:this.MUTE}},'รพ.ธรรมศาสตร์เฉลิมพระเกียรติ · SAP B1 · PO ↔ รับของ ↔ ตั้งหนี้')),
+      h('div',{style:{display:'flex',flexDirection:'column',alignItems:R.isMobile?'stretch':'flex-end',gap:10}},
+        h('button',{onClick:()=>this.setState({upOpen:true}),
+          style:{display:'flex',alignItems:'center',justifyContent:'center',gap:8,padding:'11px 16px',background:this.TEAL,color:'#fff',border:'none',borderRadius:10,fontSize:13.5,fontWeight:600,cursor:'pointer',boxShadow:'0 1px 2px rgba(15,124,128,.3)'}},
+          h('span',{style:{fontSize:15}},'↑'),'อัปโหลดข้อมูล PO / GR / Invoice'),
+        this.cloudBadge(),
+        h('div',{style:{textAlign:R.isMobile?'left':'right',fontSize:12,color:this.MUTE,lineHeight:1.6}},
+          h('div',null,'ช่วงข้อมูล ',h('b',{style:{color:this.INK,fontFamily:"'IBM Plex Mono',monospace"}},s.dateMin),' – ',h('b',{style:{color:this.INK,fontFamily:"'IBM Plex Mono',monospace"}},s.dateMax)),
+          h('div',null,'ปรับปรุง ',h('b',{style:{color:this.INK,fontFamily:"'IBM Plex Mono',monospace"}},s.generated)))));
+  }
+
+  // ---------- cloud badge ----------
+  cloudBadge(){
+    const h=React.createElement; const c=this.state.cloud||{state:'init'};
+    const map={ init:{t:'กำลังเริ่มระบบ…',col:this.MUTE,bg:'#eef2f2',dot:'#b6c2c4'}, offline:{t:'โหมดออฟไลน์',col:this.MUTE,bg:'#eef2f2',dot:'#b6c2c4'},
+      unconfigured:{t:'ยังไม่เชื่อม Firebase',col:this.TRACK.await.c,bg:this.TRACK.await.bg,dot:this.TRACK.await.c},
+      loading:{t:'กำลังซิงค์ข้อมูล…',col:this.TEAL,bg:'#e3f1f2',dot:this.TEAL},
+      connected:{t:'เชื่อมฐานข้อมูลกลาง',col:this.TRACK.full.c,bg:this.TRACK.full.bg,dot:this.TRACK.full.c},
+      error:{t:'เชื่อม Firebase ไม่สำเร็จ',col:this.RED,bg:this.REDBG,dot:this.RED} };
+    const m=map[c.state]||map.init; const meta=c.meta; let when=null;
+    if(meta&&meta.updatedAtClient){ try{ when=new Date(meta.updatedAtClient).toLocaleString('th-TH',{day:'2-digit',month:'short',year:'2-digit',hour:'2-digit',minute:'2-digit'}); }catch(e){} }
+    return h('div',{style:{display:'flex',alignItems:'center',gap:7,flexWrap:'wrap'}},
+      h('div',{style:{display:'inline-flex',alignItems:'center',gap:7,padding:'5px 11px',borderRadius:20,background:m.bg,color:m.col,fontSize:11.5,fontWeight:600}},
+        c.state==='loading'? h('span',{style:{width:11,height:11,borderRadius:'50%',border:'2px solid '+this.TEAL,borderTopColor:'transparent',animation:'spin .8s linear infinite'}}) : h('span',{style:{width:7,height:7,borderRadius:'50%',background:m.dot}}),
+        m.t, when? h('span',{style:{fontWeight:400,opacity:.85}},'· '+when):null, meta&&meta.note? h('span',{style:{fontWeight:400,opacity:.85}},'· '+meta.note):null),
+      (c.state==='connected'||c.state==='error')? h('button',{onClick:()=>this.syncFromCloud(),title:'รีเฟรชจากฐานข้อมูล',
+        style:{border:'1px solid '+this.LINE,background:'#fff',borderRadius:8,width:27,height:27,cursor:'pointer',color:this.MUTE,fontSize:13,lineHeight:1}},'⟳'):null);
+  }
+
+  // ---------- filter bar ----------
+  ctrl(label,node,basis){ return React.createElement('div',{style:{display:'flex',flexDirection:'column',gap:4,flex:basis||'0 0 auto',minWidth:0}},
+    React.createElement('div',{style:{fontSize:10.5,fontWeight:600,color:this.MUTE,textTransform:'uppercase',letterSpacing:.4}},label), node); }
+  select(key,opts,wide){ const h=React.createElement; const v=this.state.f[key]; const R=this.R;
+    return h('select',{value:v,onChange:e=>this.setF(key,e.target.value),
+      style:{padding:'8px 9px',border:'1px solid '+(v?this.TEAL:this.LINE),borderRadius:8,fontSize:12.5,color:v?this.INK:this.MUTE,background:v?'#f0f8f8':'#fff',width:R.isMobile?'100%':'auto',minWidth:R.isMobile?0:(wide?170:120),maxWidth:R.isMobile?'none':(wide?230:170),cursor:'pointer',outline:'none'}},
+      [h('option',{key:'',value:''},'ทั้งหมด'), ...opts.map(o=>h('option',{key:o,value:o}, o.length>34?o.slice(0,33)+'…':o))]); }
+  dateInput(key){ const h=React.createElement; const v=this.state.f[key];
+    return h('input',{type:'date',value:v,onChange:e=>this.setF(key,e.target.value),
+      style:{padding:'7px 9px',border:'1px solid '+(v?this.TEAL:this.LINE),borderRadius:8,fontSize:12.5,color:this.INK,background:v?'#f0f8f8':'#fff',outline:'none',width:this.R.isMobile?'100%':'auto'}}); }
+  filterBar(count){
+    const h=React.createElement; const f=this.state.f; const active=this.activeCount(); const R=this.R;
+    const show = !R.isMobile || this.state.filterOpen;
+    const basis = R.isMobile? '1 1 46%' : (R.isTablet? '1 1 30%' : '0 0 auto');
+    const head = h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,marginBottom:show?12:0}},
+      h('div',{style:{display:'flex',alignItems:'center',gap:10}},
+        h('div',{style:{fontSize:13,fontWeight:700,color:this.INK}},'ตัวกรองข้อมูล'),
+        active? h('span',{style:{padding:'2px 9px',borderRadius:20,background:this.TEAL,color:'#fff',fontSize:11,fontWeight:600}},active+' ตัวกรอง'):null),
+      h('div',{style:{display:'flex',alignItems:'center',gap:8}},
+        h('div',{style:{fontSize:11.5,color:this.MUTE}},'พบ ',h('b',{style:{color:this.INK,fontFamily:"'IBM Plex Mono',monospace"}},this.fmtN(count)),' ใบ'),
+        active? h('button',{onClick:()=>this.clearF(),style:{padding:'5px 11px',border:'1px solid '+this.LINE,background:'#fff',borderRadius:8,fontSize:12,color:this.RED,cursor:'pointer',fontWeight:500}},'✕ ล้าง'):null,
+        R.isMobile? h('button',{onClick:()=>this.setState(s=>({filterOpen:!s.filterOpen})),style:{padding:'6px 12px',border:'1px solid '+this.LINE,background:this.state.filterOpen?this.PANEL:'#fff',borderRadius:8,fontSize:12.5,color:this.INK,cursor:'pointer',fontWeight:500}}, this.state.filterOpen?'ซ่อน ▴':'แสดง ▾'):null));
+    const controls = show? h('div',{style:{display:'flex',alignItems:'flex-end',gap:12,flexWrap:'wrap'}},
+      h('div',{style:{display:'flex',flexDirection:'column',gap:4,flex:R.isMobile?'1 1 100%':'0 0 auto'}},
+        h('div',{style:{fontSize:10.5,fontWeight:600,color:this.MUTE,textTransform:'uppercase',letterSpacing:.4}},'ค้นหา'),
+        h('div',{style:{position:'relative'}},
+          h('input',{value:f.q,onChange:e=>this.setF('q',e.target.value),placeholder:'PO / ผู้ขาย / สินค้า / หมายเหตุ',
+            style:{width:R.isMobile?'100%':230,padding:'8px 11px 8px 28px',border:'1px solid '+(f.q?this.TEAL:this.LINE),borderRadius:8,fontSize:12.5,outline:'none',color:this.INK,background:f.q?'#f0f8f8':'#fff'}}),
+          h('div',{style:{position:'absolute',left:9,top:8,color:this.MUTE,fontSize:13}},'⌕'))),
+      this.ctrl('ชุดเอกสาร (Prefix)', this.select('prefix',this.options('pf')), basis),
+      this.ctrl('ผู้ขาย', this.select('vendor',this.options('vn'),true), basis),
+      this.ctrl('คลัง', this.select('wh',this.options('wh')), basis),
+      this.ctrl('แผนก', this.select('dept',this.options('dept')), basis),
+      this.ctrl('ผู้รับผิดชอบ', this.select('person',this.options('pn'),true), basis),
+      this.ctrl('วันที่ตั้งแต่', this.dateInput('from'), basis),
+      this.ctrl('ถึงวันที่', this.dateInput('to'), basis)
+    ):null;
+    return this.card(h('div',{style:{padding:R.isMobile?'13px 14px':'14px 16px'}}, head, controls),{marginBottom:14});
+  }
+
+  // ---------- KPIs ----------
+  kpis(M){
+    const h=React.createElement; const s=this.D.summary; const R=this.R;
+    const items=[
+      {k:'all',label:'ใบสั่งซื้อ (ในมุมมอง)',val:this.fmtN(M.totalPO),unit:'ใบ',sub:'จากทั้งหมด '+this.fmtN(s.totalPO)+' ใบ',c:this.INK,accent:this.TEAL},
+      {k:'await',label:'รอรับของ',val:this.fmtN(M.track.await),unit:'ใบ',sub:'ยังไม่มีการรับเข้า',c:this.TRACK.await.c,accent:this.TRACK.await.c},
+      {k:'partial',label:'รับของบางส่วน',val:this.fmtN(M.track.partial),unit:'ใบ',sub:'รับแล้วบางรายการ',c:this.TRACK.partial.c,accent:this.TRACK.partial.c},
+      {k:'overdue',label:'เกินกำหนดส่ง',val:this.fmtN(M.overdue),unit:'ใบ',sub:M.overdue?('เลยกำหนด · สูงสุด '+this.fmtN(M.overdueMaxDays)+' วัน'):'เลยวันที่กำหนดส่ง',c:this.RED,accent:this.RED},
+      {k:null,label:'มูลค่าค้างรับของ',val:'฿'+this.fmtM(M.valAwait),unit:this.unitM(M.valAwait),sub:'ประเมินจากจำนวนค้างรับ',c:this.TRACK.await.c,accent:this.TRACK.await.c},
+      {k:null,label:'มูลค่าจัดซื้อรวม',val:'฿'+this.fmtM(M.totalValue),unit:this.unitM(M.totalValue),sub:this.fmtN(M.track.full)+' ใบ รับครบแล้ว',c:this.INK,accent:this.TRACK.full.c}
+    ];
+    const cols=R.isMobile?2:R.isTablet?3:6;
+    return h('div',{style:{display:'grid',gridTemplateColumns:'repeat('+cols+',1fr)',gap:R.isMobile?10:14,marginBottom:14}},
+      items.map((it,i)=> h('div',{key:i,onClick:it.k?()=>this.setTab(it.k):undefined,
+        style:{cursor:it.k?'pointer':'default',background:'#fff',border:'1px solid '+(this.state.tab===it.k&&it.k?it.accent:this.LINE),borderRadius:14,padding:R.isMobile?'13px 13px 12px':'16px 16px 15px',position:'relative',overflow:'hidden',boxShadow:'0 1px 2px rgba(20,40,50,.04)'}},
+        h('div',{style:{position:'absolute',left:0,top:0,bottom:0,width:3,background:it.accent}}),
+        h('div',{style:{fontSize:R.isMobile?11:12,color:this.MUTE,fontWeight:500,marginBottom:R.isMobile?6:9,minHeight:R.isMobile?28:32,lineHeight:1.25}},it.label),
+        h('div',{style:{display:'flex',alignItems:'baseline',gap:5}},
+          h('div',{style:{fontSize:R.isMobile?21:25,fontWeight:700,color:it.c,fontFamily:"'IBM Plex Mono',monospace",letterSpacing:-.5}},it.val),
+          h('div',{style:{fontSize:11,color:this.MUTE}},it.unit)),
+        h('div',{style:{fontSize:10.5,color:this.MUTE,marginTop:6,lineHeight:1.3}},it.sub))));
+  }
+
+  // ---------- pipeline ----------
+  pipeline(){
+    const h=React.createElement; const s=this.D.summary; const R=this.R;
+    const stage=(badge,title,big,unit,sub,c)=> h('div',{style:{flex:1,padding:'4px 2px',minWidth:0}},
+      h('div',{style:{display:'flex',alignItems:'center',gap:8,marginBottom:8}},
+        h('div',{style:{width:22,height:22,borderRadius:6,background:c,color:'#fff',fontSize:11,fontWeight:700,display:'flex',alignItems:'center',justifyContent:'center',fontFamily:"'IBM Plex Mono',monospace"}},badge),
+        h('div',{style:{fontSize:13,fontWeight:600}},title)),
+      h('div',{style:{display:'flex',alignItems:'baseline',gap:6}},
+        h('div',{style:{fontSize:22,fontWeight:700,fontFamily:"'IBM Plex Mono',monospace",color:this.INK}},big),
+        h('div',{style:{fontSize:12,color:this.MUTE}},unit)),
+      h('div',{style:{fontSize:11.5,color:this.MUTE,marginTop:4}},sub));
+    const arrow=()=> h('div',{style:{alignSelf:'center',color:'#b6c2c4',fontSize:20,padding:R.isMobile?'2px 0':'0 6px',transform:R.isMobile?'rotate(90deg)':'none'}},'→');
+    const apStage = s.apProvided
+      ? stage('AP','ตั้งหนี้ (A/P Invoice)',this.fmtN(s.totalAP),'ใบ','มูลค่า ฿'+this.fmtM(s.apValue)+' ล้าน · รอตั้งหนี้ '+this.fmtN(s.grUninvoiced)+' ใบ',this.MUTE)
+      : stage('AP','ตั้งหนี้/ตั้งเบิก',this.fmtN(s.grClosed),'ใบ','ประเมินจากสถานะ GR',this.MUTE);
+    return this.card(h('div',{style:{padding:R.isMobile?'16px 16px':'18px 22px'}},
+      this.secTitle('ขั้นตอนจัดซื้อ–รับของ–ตั้งหนี้ (SAP Document Flow) · ภาพรวมทั้งระบบ'),
+      h('div',{style:{display:'flex',flexDirection:R.isMobile?'column':'row',alignItems:'stretch',gap:R.isMobile?4:0}},
+        stage('PO','ใบสั่งซื้อ',this.fmtN(s.totalPO),'ใบ','มูลค่า ฿'+this.fmtM(s.totalValue)+' ล้าน',this.TEAL), arrow(),
+        stage('GR','รับของเข้าคลัง',this.fmtN(s.totalGR),'ใบ','รอตั้งหนี้ (Open) '+this.fmtN(s.apProvided?s.grUninvoiced:s.grOpen)+' ใบ',this.TRACK.full.c), arrow(),
+        apStage)),{marginBottom:14});
+  }
+
+  // ---------- charts ----------
+  charts(M){ const h=React.createElement; const R=this.R;
+    return h('div',{style:{display:'grid',gridTemplateColumns:R.narrow?'1fr':'320px 1fr',gap:14,marginBottom:14}},
+      this.statusCard(M), this.trendCard(M)); }
+  legend(c,label,val,dashed){ const h=React.createElement;
+    return h('div',{style:{display:'flex',alignItems:'center',gap:8,padding:'3px 0',fontSize:12.5}},
+      h('div',{style:{width:10,height:10,borderRadius:3,background:dashed?'#fff':c,border:dashed?'1.5px dashed '+c:'none',flexShrink:0}}),
+      h('div',{style:{flex:1,color:dashed?this.RED:this.INK}},label),
+      h('div',{style:{fontWeight:600,fontFamily:"'IBM Plex Mono',monospace",color:dashed?this.RED:this.INK}},this.fmtN(val))); }
+  statusCard(M){ const h=React.createElement;
+    const a=M.track.await, p=M.track.partial, out=a+p, full=M.track.full, tot=full+out||1;
+    const pct=Math.round(full/tot*100); const aDeg= out? a/out*360:0;
+    return this.card(h('div',{style:{padding:'18px 20px'}}, this.secTitle('สัดส่วนสถานะการรับของ'),
+      h('div',{style:{display:'flex',alignItems:'center',gap:18}},
+        h('div',{style:{position:'relative',width:118,height:118,flexShrink:0}},
+          h('div',{style:{position:'absolute',inset:0,borderRadius:'50%',background: out? 'conic-gradient('+this.TRACK.await.c+' 0 '+aDeg+'deg, '+this.TRACK.partial.c+' '+aDeg+'deg 360deg)':'#e6f4ee'}}),
+          h('div',{style:{position:'absolute',inset:13,borderRadius:'50%',background:'#fff',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center'}},
+            h('div',{style:{fontSize:23,fontWeight:700,fontFamily:"'IBM Plex Mono',monospace",color:this.INK}},this.fmtN(out)),
+            h('div',{style:{fontSize:10,color:this.MUTE}},'ใบ ค้างรับ'))),
+        h('div',{style:{flex:1}},
+          h('div',{style:{display:'flex',alignItems:'center',gap:8,marginBottom:11}},
+            h('div',{style:{fontSize:31,fontWeight:700,color:this.TRACK.full.c,fontFamily:"'IBM Plex Mono',monospace"}},pct+'%'),
+            h('div',{style:{fontSize:12,color:this.MUTE,lineHeight:1.25}},'รับของ',h('br'),'ครบแล้ว')),
+          this.legend(this.TRACK.await.c,'รอรับของ',a), this.legend(this.TRACK.partial.c,'รับบางส่วน',p),
+          this.legend(this.RED,'· เกินกำหนดส่ง',M.overdue,true))))); }
+  trendCard(M){ const h=React.createElement; const m=this.D.summary.monthly; const R=this.R;
+    const max=Math.max(...m.map(x=>Math.max(M.poByMonth[x.m]||0,x.recv)),1);
+    return this.card(h('div',{style:{padding:'18px 20px'}},
+      h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,marginBottom:14,flexWrap:'wrap'}},
+        h('div',{style:{fontSize:11.5,fontWeight:600,letterSpacing:1,color:this.MUTE,textTransform:'uppercase'}},'แนวโน้มรายเดือน · ออก PO เทียบ รับของ'),
+        h('div',{style:{display:'flex',gap:14,fontSize:11.5}},
+          h('span',{style:{display:'flex',alignItems:'center',gap:5}},h('span',{style:{width:9,height:9,borderRadius:2,background:this.TEAL}}),'ออก PO'),
+          h('span',{style:{display:'flex',alignItems:'center',gap:5}},h('span',{style:{width:9,height:9,borderRadius:2,background:this.TRACK.full.c}}),'รับของ GR'))),
+      h('div',{style:{display:'flex',alignItems:'flex-end',gap:R.isMobile?2:3,height:140,paddingTop:6,overflowX:'auto'}},
+        m.map((x,i)=>{ const[y,mo]=x.m.split('-'); const ny=mo==='01'||i===0; const po=M.poByMonth[x.m]||0;
+          return h('div',{key:i,title:mo+'/'+y+'  ·  ออก PO '+po+' ใบ  ·  รับของ '+x.recv+' ใบ',
+            style:{flex:'1 0 auto',minWidth:R.isMobile?9:0,display:'flex',flexDirection:'column',alignItems:'center',gap:4}},
+            h('div',{style:{display:'flex',alignItems:'flex-end',gap:2,height:108,width:'100%',justifyContent:'center'}},
+              h('div',{style:{width:'42%',maxWidth:11,minWidth:3,height:(po/max*100)+'%',background:this.TEAL,borderRadius:'3px 3px 0 0',minHeight:po?2:0}}),
+              h('div',{style:{width:'42%',maxWidth:11,minWidth:3,height:(x.recv/max*100)+'%',background:this.TRACK.full.c,borderRadius:'3px 3px 0 0',minHeight:x.recv?2:0}})),
+            h('div',{style:{fontSize:9,color:ny?this.INK:this.MUTE,fontWeight:ny?700:400,whiteSpace:'nowrap',fontFamily:"'IBM Plex Mono',monospace"}}, ny? y.slice(2):'·'));
+        })),
+      h('div',{style:{marginTop:8,fontSize:11,color:this.MUTE}},'แท่งฟ้า = PO ตามตัวกรอง · แท่งเขียว = ใบรับของทั้งระบบ'))); }
+
+  // ---------- prefix ----------
+  prefixSection(){
+    const h=React.createElement; const data=this.breakdown('pf','prefix'); const R=this.R;
+    const cols=R.isMobile?2:R.isTablet?3:Math.min(data.length,6);
+    return this.card(h('div',{style:{padding:R.isMobile?'16px':'18px 20px'}},
+      this.secTitle('ภาพรวมตามชุดเอกสาร (Prefix) — แตะเพื่อกรอง',
+        this.state.f.prefix? h('button',{onClick:()=>this.setF('prefix',''),style:{padding:'4px 10px',border:'1px solid '+this.LINE,background:'#fff',borderRadius:7,fontSize:11.5,color:this.TEAL,cursor:'pointer'}},'แสดงทุกชุด'):null),
+      h('div',{style:{display:'grid',gridTemplateColumns:'repeat('+cols+',1fr)',gap:R.isMobile?10:12}},
+        data.map((d,i)=>{ const sel=this.state.f.prefix===d.k; const recvPct=Math.round((d.count-d.open)/d.count*100);
+          return h('div',{key:i,onClick:()=>this.toggleF('prefix',d.k),
+            style:{cursor:'pointer',border:'1px solid '+(sel?this.TEAL:this.LINE),background:sel?'#f0f8f8':'#fff',borderRadius:11,padding:'13px 14px'}},
+            h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}},
+              h('div',{style:{fontFamily:"'IBM Plex Mono',monospace",fontWeight:700,fontSize:15,color:this.INK}},d.k),
+              h('div',{style:{fontSize:11,color:this.MUTE}},'฿'+this.fmtM(d.val))),
+            h('div',{style:{display:'flex',alignItems:'baseline',gap:5,marginBottom:9}},
+              h('div',{style:{fontSize:21,fontWeight:700,fontFamily:"'IBM Plex Mono',monospace"}},this.fmtN(d.count)),
+              h('div',{style:{fontSize:11,color:this.MUTE}},'ใบ')),
+            h('div',{style:{height:5,borderRadius:3,background:'#eef2f2',overflow:'hidden',marginBottom:7}},
+              h('div',{style:{height:'100%',width:recvPct+'%',background:this.TRACK.full.c}})),
+            h('div',{style:{display:'flex',justifyContent:'space-between',fontSize:11}},
+              h('span',{style:{color:this.TRACK.full.c}},'รับครบ '+recvPct+'%'),
+              d.open? h('span',{style:{color:this.TRACK.await.c,fontWeight:600}},'ค้าง '+this.fmtN(d.open)):h('span',{style:{color:this.MUTE}},'—')));
+        }))),{marginBottom:14});
+  }
+
+  // ---------- people + vendor ----------
+  barList(title,key,except){
+    const h=React.createElement; const data=this.breakdown(key,except,8);
+    const max=Math.max(...data.map(d=>d.count),1);
+    const fkey = key==='pn'?'person':key==='vn'?'vendor':'dept'; const sel=this.state.f[fkey];
+    return this.card(h('div',{style:{padding:'18px 20px',height:'100%'}},
+      this.secTitle(title, sel? h('button',{onClick:()=>this.setF(fkey,''),style:{padding:'4px 10px',border:'1px solid '+this.LINE,background:'#fff',borderRadius:7,fontSize:11.5,color:this.TEAL,cursor:'pointer'}},'ล้าง'):null),
+      h('div',{style:{display:'flex',flexDirection:'column',gap:9}},
+        data.map((d,i)=> h('div',{key:i,onClick:()=>this.toggleF(fkey,d.k),
+          style:{cursor:'pointer',display:'grid',gridTemplateColumns:'1fr 52px',gap:10,alignItems:'center',padding:'2px 4px',borderRadius:7,background:this.state.f[fkey]===d.k?'#f0f8f8':'transparent'}},
+          h('div',{style:{minWidth:0}},
+            h('div',{style:{fontSize:12.5,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',color:this.INK,marginBottom:4}},d.k),
+            h('div',{style:{height:6,borderRadius:3,background:'#eef2f2',overflow:'hidden',display:'flex'}},
+              h('div',{style:{height:'100%',width:((d.count-d.open)/max*100)+'%',background:this.TEAL}}),
+              h('div',{style:{height:'100%',width:(d.open/max*100)+'%',background:this.TRACK.await.c}}))),
+          h('div',{style:{textAlign:'right'}},
+            h('div',{style:{fontSize:13,fontWeight:600,fontFamily:"'IBM Plex Mono',monospace"}},this.fmtN(d.count)),
+            d.open? h('div',{style:{fontSize:10,color:this.TRACK.await.c,fontFamily:"'IBM Plex Mono',monospace"}},'ค้าง '+d.open):null)))),
+      h('div',{style:{marginTop:11,fontSize:10.5,color:this.MUTE,display:'flex',gap:12}},
+        h('span',null,h('span',{style:{display:'inline-block',width:8,height:8,borderRadius:2,background:this.TEAL,marginRight:4}}),'รับครบ'),
+        h('span',null,h('span',{style:{display:'inline-block',width:8,height:8,borderRadius:2,background:this.TRACK.await.c,marginRight:4}}),'ค้างรับ'))));
+  }
+  peopleVendor(){ const h=React.createElement;
+    return h('div',{style:{display:'grid',gridTemplateColumns:this.R.isMobile?'1fr':'1fr 1fr',gap:14,marginBottom:14}},
+      this.barList('ผู้รับผิดชอบสูงสุด (First Name) — แตะเพื่อกรอง','pn','person'),
+      this.barList('ผู้ขายสูงสุด — แตะเพื่อกรอง','vn','vendor')); }
+
+  // ---------- table / cards ----------
+  COLS=[
+    {k:'tr',label:'สถานะ',w:'112px'},{k:'doc',label:'เลขที่ PO',w:'128px',sort:'doc'},
+    {k:'post',label:'วันที่เอกสาร',w:'100px',sort:'post'},{k:'deliv',label:'กำหนดส่ง',w:'100px',sort:'deliv'},
+    {k:'vn',label:'ผู้ขาย',w:'1fr',sort:'vn'},{k:'dept',label:'แผนก/คลัง',w:'110px'},
+    {k:'pn',label:'ผู้รับผิดชอบ',w:'140px',sort:'pn'},{k:'rp',label:'รับแล้ว',w:'120px',sort:'rp'},
+    {k:'val',label:'มูลค่า (฿)',w:'110px',sort:'val',right:true},{k:'gd',label:'GR/INV',w:'74px',right:true}
+  ];
+  grid(){ return this.COLS.map(c=>c.w).join(' '); }
+  sortRows(rows){ const {sortKey,sortDir}=this.state; const rank={await:0,partial:1,full:2}; const r=rows.slice();
+    r.sort((a,b)=>{ if(sortKey==='urgent'){ const au=a.od?0:1,bu=b.od?0:1; if(au!==bu) return au-bu; if(rank[a.tr]!==rank[b.tr]) return rank[a.tr]-rank[b.tr]; return this.dnum(a.deliv)-this.dnum(b.deliv); }
+      let av,bv; if(sortKey==='post'){av=this.dnum(a.post);bv=this.dnum(b.post);} else if(sortKey==='deliv'){av=this.dnum(a.deliv);bv=this.dnum(b.deliv);}
+      else if(sortKey==='val'){av=a.val;bv=b.val;} else if(sortKey==='rp'){av=a.rp;bv=b.rp;} else if(sortKey==='vn'){av=a.vn||'';bv=b.vn||'';}
+      else if(sortKey==='pn'){av=a.pn||'';bv=b.pn||'';} else {av=a.doc;bv=b.doc;}
+      if(av<bv) return -sortDir; if(av>bv) return sortDir; return 0; }); return r; }
+  tableSection(scope){
+    const h=React.createElement; const R=this.R;
+    const counts={ all:scope.length, await:0, partial:0, full:0, overdue:0 };
+    for(const r of scope){ counts[r.tr]++; if(r.od) counts.overdue++; }
+    const tabs=[ {k:'all',label:'ทั้งหมด',n:counts.all},{k:'await',label:'รอรับของ',n:counts.await,c:this.TRACK.await.c},
+      {k:'partial',label:'รับบางส่วน',n:counts.partial,c:this.TRACK.partial.c},{k:'overdue',label:'เกินกำหนด',n:counts.overdue,c:this.RED},
+      {k:'full',label:'รับครบ',n:counts.full,c:this.TRACK.full.c} ];
+    let rows=scope.filter(r=> this.state.tab==='all'?true : this.state.tab==='overdue'? r.od : r.tr===this.state.tab );
+    rows=this.sortRows(rows);
+    const {page,perPage}=this.state; const pages=Math.max(1,Math.ceil(rows.length/perPage));
+    const pg=Math.min(page,pages-1); const view=rows.slice(pg*perPage,pg*perPage+perPage);
+    return this.card(h('div',null,
+      h('div',{style:{padding:R.isMobile?'14px 14px':'16px 18px',borderBottom:'1px solid '+this.LINE,display:'flex',alignItems:'center',gap:R.isMobile?10:14,flexWrap:'wrap'}},
+        h('div',{style:{fontSize:15,fontWeight:700}},'รายการใบสั่งซื้อ'),
+        h('div',{style:{display:'flex',gap:6,flexWrap:'wrap'}},
+          tabs.map(t=> h('div',{key:t.k,onClick:()=>this.setTab(t.k),
+            style:{cursor:'pointer',padding:'6px 11px',borderRadius:8,fontSize:12.5,fontWeight:this.state.tab===t.k?600:400,
+              background:this.state.tab===t.k?(t.c||this.INK):'#f1f5f5',color:this.state.tab===t.k?'#fff':this.MUTE,display:'flex',alignItems:'center',gap:6}},
+            t.label, h('span',{style:{fontFamily:"'IBM Plex Mono',monospace",fontSize:11,opacity:.85}},this.fmtN(t.n))))),
+        h('div',{style:{flex:1}}),
+        h('button',{onClick:()=>this.setState({printOpen:true}),style:{display:'flex',alignItems:'center',gap:6,padding:'7px 13px',border:'1px solid '+this.LINE,background:'#fff',borderRadius:8,fontSize:12.5,color:this.INK,cursor:'pointer',fontWeight:500}}, h('span',null,'🖨'),'พิมพ์รายงาน'),
+        R.cardMode? null : h('div',{style:{fontSize:12,color:this.MUTE}},'เรียงตาม: ',h('b',{style:{color:this.INK}}, this.sortLabel()))),
+      R.cardMode? this.cardList(view) :
+        h('div',{style:{overflowX:'auto'}}, h('div',{style:{minWidth:1200}}, this.thead(),
+          view.length? view.map(r=>this.row(r)) : h('div',{style:{padding:'48px',textAlign:'center',color:this.MUTE,fontSize:13.5}},'ไม่พบใบสั่งซื้อที่ตรงกับเงื่อนไข'))),
+      h('div',{style:{padding:R.isMobile?'12px 14px':'12px 18px',borderTop:'1px solid '+this.LINE,display:'flex',alignItems:'center',justifyContent:'space-between',gap:12,flexWrap:'wrap'}},
+        h('div',{style:{fontSize:12.5,color:this.MUTE}},'แสดง ',h('b',{style:{color:this.INK,fontFamily:"'IBM Plex Mono',monospace"}},rows.length?(pg*perPage+1):0),'–',h('b',{style:{color:this.INK,fontFamily:"'IBM Plex Mono',monospace"}},Math.min((pg+1)*perPage,rows.length)),' / ',h('b',{style:{color:this.INK,fontFamily:"'IBM Plex Mono',monospace"}},this.fmtN(rows.length)),' ใบ'),
+        h('div',{style:{display:'flex',alignItems:'center',gap:4}},
+          this.pgBtn('‹',pg<=0,()=>this.setState({page:pg-1})),
+          h('div',{style:{fontSize:12.5,color:this.MUTE,padding:'0 10px',fontFamily:"'IBM Plex Mono',monospace"}},(pg+1)+' / '+pages),
+          this.pgBtn('›',pg>=pages-1,()=>this.setState({page:pg+1}))))
+    ),{overflow:'hidden'});
+  }
+  sortLabel(){ const m={urgent:'เร่งด่วน',doc:'เลขที่ PO',post:'วันที่เอกสาร',deliv:'กำหนดส่ง',vn:'ผู้ขาย',pn:'ผู้รับผิดชอบ',rp:'% รับแล้ว',val:'มูลค่า'}; return m[this.state.sortKey]||'เร่งด่วน'; }
+  pgBtn(label,dis,on){ return React.createElement('button',{onClick:dis?undefined:on,disabled:dis,
+    style:{padding:'7px 14px',border:'1px solid '+this.LINE,background:dis?'#f4f6f6':'#fff',color:dis?'#b6c2c4':this.INK,borderRadius:8,fontSize:14,fontFamily:'inherit',cursor:dis?'default':'pointer'}},label); }
+  thead(){ const h=React.createElement;
+    return h('div',{style:{display:'grid',gridTemplateColumns:this.grid(),padding:'9px 18px',background:this.PANEL,borderBottom:'1px solid '+this.LINE,fontSize:11,fontWeight:600,color:this.MUTE,letterSpacing:.2,textTransform:'uppercase'}},
+      this.COLS.map((c,i)=> h('div',{key:i,onClick:c.sort?()=>this.setSort(c.sort):undefined,
+        style:{cursor:c.sort?'pointer':'default',whiteSpace:'nowrap',textAlign:c.right?'right':'left',display:'flex',alignItems:'center',gap:4,justifyContent:c.right?'flex-end':'flex-start',userSelect:'none'}},
+        c.label, c.sort&&this.state.sortKey===c.sort? h('span',{style:{color:this.TEAL}},this.state.sortDir>0?'▲':'▼'):null))); }
+  statusPill(r,small){ const h=React.createElement; const t=this.TRACK[r.tr];
+    return h('span',{style:{display:'inline-flex',alignItems:'center',gap:5,padding:small?'2px 8px':'3px 9px',borderRadius:20,background:t.bg,color:t.c,fontSize:small?10.5:11,fontWeight:600,whiteSpace:'nowrap'}},
+      h('span',{style:{width:6,height:6,borderRadius:'50%',background:t.c}}),t.label); }
+  rpBar(r){ const h=React.createElement;
+    return h('div',null,
+      h('div',{style:{display:'flex',justifyContent:'space-between',fontSize:10.5,marginBottom:3}},
+        h('span',{style:{color:this.MUTE}}, r.tr==='full'?'ครบ':(r.oq>0?'ค้าง '+this.fmtN(r.oq):'')),
+        h('span',{style:{fontFamily:"'IBM Plex Mono',monospace",fontWeight:600,color:this.INK}},r.rp+'%')),
+      h('div',{style:{height:5,borderRadius:3,background:'#eef2f2',overflow:'hidden'}},
+        h('div',{style:{height:'100%',width:r.rp+'%',borderRadius:3,background: r.rp>=100?this.TRACK.full.c:(r.rp>0?this.TRACK.partial.c:this.TRACK.await.c)}}))); }
+  grInvCell(r){ const h=React.createElement;
+    return h('div',{style:{display:'flex',gap:4,justifyContent:'flex-end',alignItems:'center'}},
+      r.gd? h('span',{style:{fontFamily:"'IBM Plex Mono',monospace",fontSize:11,color:this.TRACK.full.c,fontWeight:600,padding:'2px 6px',borderRadius:6,background:this.TRACK.full.bg}},'GR '+r.gd):null,
+      r.ap? h('span',{style:{fontFamily:"'IBM Plex Mono',monospace",fontSize:11,color:this.MUTE,fontWeight:600,padding:'2px 6px',borderRadius:6,background:'#eef2f2'}},'INV '+r.ap):null,
+      (!r.gd&&!r.ap)? h('span',{style:{color:'#c2cdcf'}},'—'):null); }
+  row(r){ const h=React.createElement;
+    return h('div',{key:r.doc,onClick:()=>this.setState({sel:r.doc}),
+      style:{display:'grid',gridTemplateColumns:this.grid(),padding:'11px 18px',borderBottom:'1px solid #f0f3f3',fontSize:12.5,alignItems:'center',cursor:'pointer',background:'#fff'},
+      onMouseEnter:e=>e.currentTarget.style.background='#f8fafa',onMouseLeave:e=>e.currentTarget.style.background='#fff'},
+      h('div',null, this.statusPill(r), r.od? h('div',{style:{marginTop:4}}, this.odBadge(r)):null),
+      h('div',null, h('div',{style:{fontFamily:"'IBM Plex Mono',monospace",fontWeight:600,color:this.INK}},r.doc), h('div',{style:{fontSize:10.5,color:this.MUTE,marginTop:1}},r.pf+' · '+r.ln+' รายการ')),
+      h('div',{style:{fontFamily:"'IBM Plex Mono',monospace",color:this.MUTE,fontSize:12}},this.fdate(r.post)),
+      h('div',{style:{fontFamily:"'IBM Plex Mono',monospace",fontSize:12,color:r.od?this.RED:this.MUTE,fontWeight:r.od?600:400}},this.fdate(r.deliv)),
+      h('div',{style:{paddingRight:12,minWidth:0}}, h('div',{style:{whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',color:this.INK}},r.vn), h('div',{style:{fontSize:10.5,color:this.MUTE,fontFamily:"'IBM Plex Mono',monospace"}},r.vc)),
+      h('div',{style:{fontSize:11.5}}, h('div',{style:{fontFamily:"'IBM Plex Mono',monospace",color:this.INK}},r.dept||'—'), h('div',{style:{fontSize:10.5,color:this.MUTE,fontFamily:"'IBM Plex Mono',monospace"}},r.wh)),
+      h('div',{style:{paddingRight:10,minWidth:0,fontSize:11.5,color:this.INK,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},r.pn||'—'),
+      h('div',{style:{paddingRight:14}}, this.rpBar(r)),
+      h('div',{style:{textAlign:'right',fontFamily:"'IBM Plex Mono',monospace",fontWeight:600,color:this.INK}},this.fmtN(r.val)),
+      this.grInvCell(r)); }
+  cardList(view){ const h=React.createElement;
+    if(!view.length) return h('div',{style:{padding:'44px 20px',textAlign:'center',color:this.MUTE,fontSize:13.5}},'ไม่พบใบสั่งซื้อที่ตรงกับเงื่อนไข');
+    return h('div',null, view.map(r=> h('div',{key:r.doc,onClick:()=>this.setState({sel:r.doc}),
+      style:{padding:'14px 15px',borderBottom:'1px solid #f0f3f3',cursor:'pointer',background:'#fff'}},
+      h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:10,marginBottom:9}},
+        h('div',{style:{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}, this.statusPill(r,true),
+          r.od? this.odBadge(r):null),
+        h('div',{style:{textAlign:'right',fontFamily:"'IBM Plex Mono',monospace",fontWeight:700,fontSize:14,color:this.INK}},'฿'+this.fmtN(r.val))),
+      h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'baseline',gap:10,marginBottom:7}},
+        h('div',{style:{fontFamily:"'IBM Plex Mono',monospace",fontWeight:600,fontSize:14,color:this.INK}},r.doc),
+        h('div',{style:{fontSize:11,color:this.MUTE}},r.pf+' · '+r.ln+' รายการ')),
+      h('div',{style:{fontSize:13,color:this.INK,marginBottom:2,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},r.vn),
+      h('div',{style:{fontSize:11,color:this.MUTE,marginBottom:10,fontFamily:"'IBM Plex Mono',monospace"}},r.vc+(r.pn?'  ·  '+r.pn:'')),
+      h('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'7px 14px',fontSize:11.5,marginBottom:11}},
+        h('div',null,h('span',{style:{color:this.MUTE}},'วันที่เอกสาร '),h('b',{style:{fontFamily:"'IBM Plex Mono',monospace",color:this.INK}},this.fdate(r.post))),
+        h('div',null,h('span',{style:{color:this.MUTE}},'กำหนดส่ง '),h('b',{style:{fontFamily:"'IBM Plex Mono',monospace",color:r.od?this.RED:this.INK}},this.fdate(r.deliv))),
+        h('div',null,h('span',{style:{color:this.MUTE}},'แผนก/คลัง '),h('b',{style:{fontFamily:"'IBM Plex Mono',monospace",color:this.INK}},(r.dept||'—')+' / '+r.wh)),
+        h('div',null,h('span',{style:{color:this.MUTE}},'เอกสารต่อเนื่อง '),h('b',{style:{fontFamily:"'IBM Plex Mono',monospace",color:this.INK}},'GR '+r.gd+' · INV '+r.ap))),
+      this.rpBar(r))));
+  }
+
+  // ---------- modal ----------
+  modal(){
+    const h=React.createElement; const r=this.D.rows.find(x=>x.doc===this.state.sel); if(!r) return null;
+    const t=this.TRACK[r.tr]; const close=()=>this.setState({sel:null}); const R=this.R;
+    const info=(label,val,mono)=> h('div',null, h('div',{style:{fontSize:11,color:this.MUTE,marginBottom:3}},label),
+      h('div',{style:{fontSize:13,fontWeight:500,color:this.INK,fontFamily:mono?"'IBM Plex Mono',monospace":'inherit'}},val||'—'));
+    return h('div',{onClick:close,style:{position:'fixed',inset:0,background:'rgba(18,32,38,.42)',zIndex:50,display:'flex',justifyContent:'center',alignItems:'flex-start',padding:R.isMobile?'0':'40px 20px',overflowY:'auto',animation:'overlayIn .15s ease'}},
+      h('div',{onClick:e=>e.stopPropagation(),style:{background:'#fff',borderRadius:R.isMobile?0:16,width:'100%',maxWidth:760,minHeight:R.isMobile?'100vh':'auto',boxShadow:'0 24px 60px rgba(10,25,30,.28)',animation:'sheetIn .22s cubic-bezier(.2,.7,.3,1)',overflow:'hidden'}},
+        h('div',{style:{padding:R.isMobile?'16px 18px':'20px 24px',borderBottom:'1px solid '+this.LINE,display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:16,position:R.isMobile?'sticky':'static',top:0,background:'#fff',zIndex:2}},
+          h('div',{style:{minWidth:0}},
+            h('div',{style:{display:'flex',alignItems:'center',gap:10,marginBottom:6,flexWrap:'wrap'}},
+              h('div',{style:{fontSize:20,fontWeight:700,fontFamily:"'IBM Plex Mono',monospace"}},r.doc), this.statusPill(r),
+              r.od? this.odBadge(r,true):null),
+            h('div',{style:{fontSize:13,color:this.MUTE,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},r.vn+' · '+r.vc),
+            h('div',{style:{fontSize:12.5,color:this.MUTE,marginTop:3}},'ผู้รับผิดชอบ: ',h('b',{style:{color:this.INK}},r.pn||'—'))),
+          h('button',{onClick:close,style:{border:'1px solid '+this.LINE,background:'#fff',width:34,height:34,borderRadius:9,cursor:'pointer',fontSize:16,color:this.MUTE,lineHeight:1,flexShrink:0}},'✕')),
+        h('div',{style:{padding:R.isMobile?'16px 18px':'18px 24px',display:'grid',gridTemplateColumns:'repeat('+(R.isMobile?2:4)+',1fr)',gap:16,borderBottom:'1px solid '+this.LINE,background:'#fafbfb'}},
+          info('ชุดเอกสาร',r.pf,true), info('วันที่เอกสาร',this.fdate(r.post),true), info('กำหนดส่ง',this.fdate(r.deliv),true), info('สถานะ SAP',r.st,true),
+          info('แผนก',r.dept,true), info('คลัง',r.wh,true), info('มูลค่ารวม',this.baht(r.val),true), info('รับแล้ว',r.rp+'%  ('+r.gd+' GR)',true)),
+        r.rm? h('div',{style:{padding:'12px 24px',borderBottom:'1px solid '+this.LINE,fontSize:12.5,color:this.MUTE}},h('b',{style:{color:this.INK}},'หมายเหตุ: '),r.rm):null,
+        r.grl&&r.grl.length? h('div',{style:{padding:R.isMobile?'14px 18px':'14px 24px',borderBottom:'1px solid '+this.LINE}},
+          h('div',{style:{fontSize:11.5,fontWeight:600,color:this.MUTE,textTransform:'uppercase',letterSpacing:.5,marginBottom:9}},'ใบรับของที่เชื่อมโยง (Goods Receipt)'),
+          h('div',{style:{display:'flex',flexWrap:'wrap',gap:8}}, r.grl.map((g,i)=>
+            h('div',{key:i,style:{display:'flex',alignItems:'center',gap:8,padding:'6px 11px',borderRadius:8,background:this.TRACK.full.bg,fontSize:12}},
+              h('span',{style:{fontFamily:"'IBM Plex Mono',monospace",fontWeight:600,color:this.TRACK.full.c}},g.d),
+              h('span',{style:{color:this.MUTE,fontFamily:"'IBM Plex Mono',monospace",fontSize:11}},this.fdate(g.date)),
+              h('span',{style:{fontSize:10.5,color:g.inv?this.TRACK.full.c:this.TRACK.await.c,fontWeight:600}},g.inv?'✓ ตั้งหนี้แล้ว':'รอตั้งหนี้'))))):null,
+        r.apl&&r.apl.length? h('div',{style:{padding:R.isMobile?'14px 18px':'14px 24px',borderBottom:'1px solid '+this.LINE}},
+          h('div',{style:{fontSize:11.5,fontWeight:600,color:this.MUTE,textTransform:'uppercase',letterSpacing:.5,marginBottom:9}},'ใบตั้งหนี้ที่เชื่อมโยง (A/P Invoice)'),
+          h('div',{style:{display:'flex',flexWrap:'wrap',gap:8}}, r.apl.map((a,i)=>
+            h('div',{key:i,style:{display:'flex',alignItems:'center',gap:8,padding:'6px 11px',borderRadius:8,background:'#eef2f2',fontSize:12}},
+              h('span',{style:{fontFamily:"'IBM Plex Mono',monospace",fontWeight:600,color:this.INK}},a.d),
+              h('span',{style:{color:this.MUTE,fontFamily:"'IBM Plex Mono',monospace",fontSize:11}},this.fdate(a.date)),
+              h('span',{style:{fontSize:10.5,color:this.MUTE}},a.st==='Closed'?'ชำระแล้ว/ปิด':'เปิดอยู่'))))):null,
+        h('div',{style:{padding:R.isMobile?'14px 18px 22px':'14px 24px 22px'}},
+          h('div',{style:{fontSize:11.5,fontWeight:600,color:this.MUTE,textTransform:'uppercase',letterSpacing:.5,marginBottom:10}},'รายการสินค้า'+(r.items&&r.items.length?' ('+r.items.length+(r.items.length>=25?'+':'')+' รายการ)':'')),
+          r.items&&r.items.length? h('div',{style:{border:'1px solid '+this.LINE,borderRadius:10,overflow:'hidden'}},
+            h('div',{style:{overflowX:'auto'}}, h('div',{style:{minWidth:R.isMobile?460:'auto'}},
+              h('div',{style:{display:'grid',gridTemplateColumns:'92px 1fr 92px 80px 100px',padding:'8px 12px',background:this.PANEL,fontSize:10.5,fontWeight:600,color:this.MUTE,textTransform:'uppercase'}},
+                h('div',null,'รหัส'),h('div',null,'รายการ'),h('div',{style:{textAlign:'right'}},'จำนวน'),h('div',{style:{textAlign:'right'}},'ค้างรับ'),h('div',{style:{textAlign:'right'}},'รวม (฿)')),
+              r.items.map((it,i)=> h('div',{key:i,style:{display:'grid',gridTemplateColumns:'92px 1fr 92px 80px 100px',padding:'9px 12px',borderTop:'1px solid #f0f3f3',fontSize:12,alignItems:'center'}},
+                h('div',{style:{fontFamily:"'IBM Plex Mono',monospace",fontSize:11,color:this.MUTE}},it.no),
+                h('div',{style:{paddingRight:10}},h('div',{style:{color:this.INK}},it.desc),h('div',{style:{fontSize:10.5,color:this.MUTE}},it.unit)),
+                h('div',{style:{textAlign:'right',fontFamily:"'IBM Plex Mono',monospace"}},this.fmtN(it.qty)),
+                h('div',{style:{textAlign:'right',fontFamily:"'IBM Plex Mono',monospace",color:it.open>0?this.TRACK.await.c:'#c2cdcf',fontWeight:it.open>0?600:400}},it.open>0?this.fmtN(it.open):'0'),
+                h('div',{style:{textAlign:'right',fontFamily:"'IBM Plex Mono',monospace",fontWeight:500}},this.fmtN(it.total))))))) 
+          : h('div',{style:{padding:'18px',textAlign:'center',color:this.MUTE,fontSize:12.5,background:'#fafbfb',borderRadius:10}},'ใบสั่งซื้อนี้รับของครบแล้ว — ดูรายละเอียดได้จากเอกสารต้นทางใน SAP'))));
+  }
+
+  // ---------- upload ----------
+  pickFile(which,file){ this.setState(s=>({ up:Object.assign({},s.up,{[which]:file,err:''}) })); }
+  async runUpload(){
+    const {po,gr,ap}=this.state.up;
+    if(!po||!gr){ this.setState(s=>({up:Object.assign({},s.up,{err:'กรุณาเลือกไฟล์ PO และ GR (ไฟล์ A/P Invoice ไม่บังคับ)'})})); return; }
+    this.setState(s=>({up:Object.assign({},s.up,{busy:true,err:'',stage:'กำลังอ่านไฟล์…'})}));
+    try{
+      if(!window.XLSXTrack) throw new Error('ตัวประมวลผลยังไม่พร้อม กรุณาลองใหม่');
+      this.setState(s=>({up:Object.assign({},s.up,{stage:'กำลังจับคู่ PO ↔ GR ↔ Invoice…'})}));
+      await new Promise(r=>setTimeout(r,30));
+      const ds=await window.XLSXTrack.fromFiles(po,gr,ap||null);
+      if(!ds.rows.length) throw new Error('ไม่พบรายการใบสั่งซื้อในไฟล์');
+      this.D=ds; window.PODATA=ds; this._opt=null; this.enrich(this.D);
+      let toast='ประมวลผลสำเร็จ · '+this.fmtN(ds.summary.totalPO)+' ใบสั่งซื้อ (เฉพาะเครื่องนี้)';
+      let cloud=this.state.cloud;
+      if(window.FBStore && window.FBStore.init()){
+        this.setState(s=>({up:Object.assign({},s.up,{stage:'กำลังบันทึกขึ้นฐานข้อมูลกลาง (Firebase)…'})}));
+        await new Promise(r=>setTimeout(r,30));
+        try{ const meta=await window.FBStore.saveCurrent(ds, this.state.up.note||''); cloud={state:'connected',meta}; toast='บันทึกขึ้นฐานข้อมูลกลางแล้ว · ทุกคนจะเห็นข้อมูลนี้'; }
+        catch(e){ this.setState(s=>({up:Object.assign({},s.up,{busy:false,stage:'',err:'ประมวลผลสำเร็จ แต่บันทึกขึ้น Firebase ไม่สำเร็จ: '+(e.message||e)})})); return; }
+      }
+      this.setState({ upOpen:false, up:{po:null,gr:null,ap:null,busy:false,err:'',stage:'',note:''}, cloud,
+        f:{q:'',prefix:'',vendor:'',wh:'',dept:'',person:'',from:'',to:''}, tab:'all', page:0, sel:null, toast });
+      clearTimeout(this._tt); this._tt=setTimeout(()=>this.setState({toast:''}),4500);
+    }catch(e){ this.setState(s=>({up:Object.assign({},s.up,{busy:false,stage:'',err:'เกิดข้อผิดพลาด: '+(e.message||e)})})); }
+  }
+  dropZone(which,label,hint){ const h=React.createElement; const file=this.state.up[which];
+    return h('label',{style:{flex:1,cursor:'pointer',display:'block',minWidth:0}},
+      h('input',{type:'file',accept:'.xlsx',style:{display:'none'},onChange:e=>{ const f=e.target.files[0]; if(f) this.pickFile(which,f); }}),
+      h('div',{style:{border:'1.5px dashed '+(file?this.TEAL:'#cfd9da'),borderRadius:12,padding:'18px 14px',textAlign:'center',background:file?'#f0f8f8':'#fafbfb'}},
+        h('div',{style:{width:36,height:36,margin:'0 auto 9px',borderRadius:10,background:file?this.TEAL:'#e7edee',color:file?'#fff':this.MUTE,display:'flex',alignItems:'center',justifyContent:'center',fontSize:17,fontWeight:700}}, file?'✓':'↑'),
+        h('div',{style:{fontSize:12.5,fontWeight:600,color:this.INK,marginBottom:3}},label),
+        file? h('div',{style:{fontSize:11,color:this.TEAL,fontFamily:"'IBM Plex Mono',monospace",wordBreak:'break-all'}},file.name) : h('div',{style:{fontSize:11,color:this.MUTE}},hint))); }
+  uploadModal(){
+    const h=React.createElement; const u=this.state.up; const R=this.R; const cfg=window.FBStore&&window.FBStore.isConfigured();
+    const close=()=>{ if(!u.busy) this.setState({upOpen:false,up:{po:null,gr:null,ap:null,busy:false,err:'',stage:'',note:''}}); };
+    return h('div',{onClick:close,style:{position:'fixed',inset:0,background:'rgba(18,32,38,.42)',zIndex:60,display:'flex',justifyContent:'center',alignItems:'flex-start',padding:R.isMobile?'0':'48px 20px',overflowY:'auto',animation:'overlayIn .15s ease'}},
+      h('div',{onClick:e=>e.stopPropagation(),style:{background:'#fff',borderRadius:R.isMobile?0:16,width:'100%',maxWidth:600,minHeight:R.isMobile?'100vh':'auto',boxShadow:'0 24px 60px rgba(10,25,30,.28)',animation:'sheetIn .22s cubic-bezier(.2,.7,.3,1)',overflow:'hidden'}},
+        h('div',{style:{padding:'20px 22px',borderBottom:'1px solid '+this.LINE,display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:12}},
+          h('div',null, h('div',{style:{fontSize:18,fontWeight:700,marginBottom:4}},'อัปโหลดข้อมูลจาก SAP'),
+            h('div',{style:{fontSize:12.5,color:this.MUTE}},'เลือกไฟล์ Excel (.xlsx) ของ PO และ GR — แนบ A/P Invoice ด้วยได้เพื่อติดตามขั้นตั้งหนี้')),
+          h('button',{onClick:close,style:{border:'1px solid '+this.LINE,background:'#fff',width:32,height:32,borderRadius:9,cursor:u.busy?'default':'pointer',fontSize:16,color:this.MUTE,flexShrink:0}},'✕')),
+        h('div',{style:{padding:'20px 22px'}},
+          h('div',{style:{display:'flex',flexDirection:R.isMobile?'column':'row',gap:12,marginBottom:13}},
+            this.dropZone('po','PO (ใบสั่งซื้อ)','คลิกเลือก .xlsx · จำเป็น'),
+            this.dropZone('gr','GR (รับของ)','คลิกเลือก .xlsx · จำเป็น'),
+            this.dropZone('ap','A/P Invoice','คลิกเลือก .xlsx · ไม่บังคับ')),
+          h('div',{style:{marginBottom:13}},
+            h('div',{style:{fontSize:11,fontWeight:600,color:this.MUTE,marginBottom:5}},'หมายเหตุรอบข้อมูล (ไม่บังคับ)'),
+            h('input',{value:u.note||'',onChange:e=>{const v=e.target.value;this.setState(s=>({up:Object.assign({},s.up,{note:v})}));},placeholder:'เช่น ข้อมูล ณ 26 มิ.ย. 2569',
+              style:{width:'100%',padding:'9px 11px',border:'1px solid '+this.LINE,borderRadius:9,fontSize:12.5,outline:'none',color:this.INK,background:'#fafbfb'}})),
+          h('div',{style:{marginBottom:13,fontSize:11.5,display:'flex',alignItems:'center',gap:8,padding:'9px 12px',borderRadius:9,background:cfg?this.TRACK.full.bg:this.TRACK.await.bg,color:cfg?this.TRACK.full.c:this.TRACK.await.c}},
+            h('span',{style:{width:7,height:7,borderRadius:'50%',background:'currentColor',flexShrink:0}}),
+            cfg? 'จะบันทึกขึ้นฐานข้อมูลกลาง Firebase — ทุกคนที่เปิดระบบจะเห็นข้อมูลชุดนี้' : 'ยังไม่ได้เชื่อม Firebase — จะประมวลผลเฉพาะเครื่องนี้ (วิธีเชื่อมดูใน README.md)'),
+          u.err? h('div',{style:{marginTop:4,marginBottom:8,padding:'11px 14px',borderRadius:9,background:this.REDBG,color:this.RED,fontSize:12.5}},u.err):null,
+          h('div',{style:{marginTop:8,display:'flex',alignItems:'center',justifyContent:'space-between',gap:12,flexWrap:'wrap'}},
+            h('div',{style:{fontSize:12.5,color:this.MUTE,display:'flex',alignItems:'center',gap:9}},
+              u.busy? h('span',{style:{width:16,height:16,borderRadius:'50%',border:'2px solid #d4dee0',borderTopColor:this.TEAL,animation:'spin .8s linear infinite',display:'inline-block'}}):null, u.busy? u.stage : ''),
+            h('div',{style:{display:'flex',gap:9}},
+              h('button',{onClick:close,disabled:u.busy,style:{padding:'10px 16px',border:'1px solid '+this.LINE,background:'#fff',borderRadius:9,fontSize:13,color:this.INK,cursor:u.busy?'default':'pointer'}},'ยกเลิก'),
+              h('button',{onClick:()=>this.runUpload(),disabled:u.busy||!u.po||!u.gr,
+                style:{padding:'10px 20px',border:'none',borderRadius:9,fontSize:13,fontWeight:600,color:'#fff',background:(u.busy||!u.po||!u.gr)?'#9fc4c5':this.TEAL,cursor:(u.busy||!u.po||!u.gr)?'default':'pointer'}},'ประมวลผลข้อมูล'))))));
+  }
+
+  toastEl(){ const h=React.createElement;
+    return h('div',{style:{position:'fixed',bottom:26,left:'50%',transform:'translateX(-50%)',zIndex:70,background:this.INK,color:'#fff',padding:'12px 20px',borderRadius:11,fontSize:13,fontWeight:500,boxShadow:'0 10px 30px rgba(10,25,30,.35)',display:'flex',alignItems:'center',gap:9,maxWidth:'92vw',animation:'fadeUp .25s ease'}},
+      h('span',{style:{width:18,height:18,borderRadius:'50%',background:this.TRACK.full.c,color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',fontSize:12,flexShrink:0}},'✓'), this.state.toast); }
+
+  // ---------- cloud sync ----------
+  async syncFromCloud(){
+    let tries=0;
+    while((!window.FBStore || !window.firebase) && tries<50){ await new Promise(r=>setTimeout(r,100)); tries++; }
+    if(!window.FBStore){ this.setState({cloud:{state:'offline'}}); return; }
+    if(!window.FBStore.isConfigured()){ this.setState({cloud:{state:'unconfigured'}}); return; }
+    this.setState({cloud:{state:'loading'}});
+    try{ const res=await window.FBStore.loadCurrent();
+      if(res && res.data && res.data.rows && res.data.rows.length){ this.D=res.data; this.enrich(this.D); window.PODATA=res.data; this._opt=null; this.setState({cloud:{state:'connected',meta:res.meta}}); }
+      else { this.setState({cloud:{state:'connected',meta:null}}); }
+    }catch(e){ this.setState({cloud:{state:'error',err:e.message||String(e)}}); }
+  }
+
+  // ---------- attention strip ----------
+  attentionStrip(){
+    const h=React.createElement; const s=this.D.summary; if(!s.apProvided) return null;
+    const set=this._scopedDocSet;
+    const pend=(this.D.grPending||[]).filter(r=>set.has(r.po)).length;
+    const invO=(this.D.grInvoicedOpen||[]).filter(r=>set.has(r.po)).length;
+    const overdue=this.scoped().filter(r=>r.od).length;
+    const chip=(color,bg,label,count,hint,onClick)=> h('div',{onClick,style:{cursor:'pointer',display:'flex',alignItems:'center',gap:11,padding:'12px 14px',borderRadius:11,border:'1px solid '+this.LINE,background:'#fff',flex:'1 1 230px',minWidth:0}},
+      h('div',{style:{minWidth:42,height:38,padding:'0 8px',borderRadius:9,background:bg,color:color,display:'flex',alignItems:'center',justifyContent:'center',fontWeight:700,fontFamily:"'IBM Plex Mono',monospace",fontSize:16,flexShrink:0}},this.fmtN(count)),
+      h('div',{style:{minWidth:0}}, h('div',{style:{fontSize:12.5,fontWeight:600,color:this.INK,lineHeight:1.25}},label), h('div',{style:{fontSize:11,color:this.MUTE,marginTop:2}},hint)));
+    return this.card(h('div',{style:{padding:this.R.isMobile?'14px':'16px 18px'}},
+      this.secTitle('รายการที่ต้องติดตาม (ตามตัวกรองปัจจุบัน)'),
+      h('div',{style:{display:'flex',gap:12,flexWrap:'wrap'}},
+        chip(this.TRACK.await.c,this.TRACK.await.bg,'รับของแล้ว · รอตั้งหนี้',pend,'คลิกดูรายการ GR →',()=>this.setState({docList:'pending'})),
+        chip(this.TEAL,'#e3f1f2','ตั้งหนี้แล้ว · ใบตั้งหนี้ยังไม่ปิด',invO,'คลิกดูรายการ GR →',()=>this.setState({docList:'invOpen'})),
+        chip(this.RED,this.REDBG,'PO เกินกำหนดส่ง',overdue,'คลิกดูในตาราง →',()=>{ this.setState({tab:'overdue',page:0}); })
+      )),{marginBottom:14});
+  }
+
+  // ---------- doc list modal (GR pending / invoiced-but-open) ----------
+  docListModal(){
+    const h=React.createElement; const type=this.state.docList; const isPend=type==='pending'; const R=this.R;
+    const set=this._scopedDocSet;
+    const list=((isPend?this.D.grPending:this.D.grInvoicedOpen)||[]).filter(r=>set.has(r.po));
+    const close=()=>this.setState({docList:null});
+    const total=list.reduce((a,r)=>a+r.val,0);
+    const title=isPend?'เอกสารรับของที่รอตั้งหนี้':'GR ที่ตั้งหนี้แล้ว แต่ใบตั้งหนี้ยังไม่ปิด';
+    const sub=isPend?'ใบรับของ (GR) ที่ยังไม่มีใบตั้งหนี้ A/P Invoice อ้างอิงถึง':'ใบรับของที่มีใบตั้งหนี้แล้ว แต่ใบตั้งหนี้ยังมีสถานะ Open (ยังไม่ปิด/ชำระ)';
+    const cols = isPend? '120px 78px 1fr 96px 110px 110px' : '120px 78px 1fr 110px 110px 150px';
+    const headRow = R.cardMode? null : h('div',{style:{display:'grid',gridTemplateColumns:cols,padding:'8px 16px',background:this.PANEL,borderBottom:'1px solid '+this.LINE,fontSize:10.5,fontWeight:600,color:this.MUTE,textTransform:'uppercase',position:'sticky',top:0}},
+      h('div',null,'เลขที่ GR'),h('div',null,'วันที่'),h('div',null,'ผู้ขาย'),h('div',null,'แผนก/คลัง'),
+      isPend? h('div',null,'ผู้รับผิดชอบ'): h('div',null,'ใบตั้งหนี้ (Open)'),
+      h('div',{style:{textAlign:'right'}},'มูลค่า (฿)'));
+    const rowEl = (r,i)=> R.cardMode
+      ? h('div',{key:i,onClick:()=>this.setState({sel:r.po,docList:null}),style:{padding:'12px 15px',borderBottom:'1px solid #f0f3f3',cursor:'pointer'}},
+          h('div',{style:{display:'flex',justifyContent:'space-between',gap:10,marginBottom:5}},
+            h('span',{style:{fontFamily:"'IBM Plex Mono',monospace",fontWeight:600,color:this.INK}},r.d),
+            h('span',{style:{fontFamily:"'IBM Plex Mono',monospace",fontWeight:600}},'฿'+this.fmtN(r.val))),
+          h('div',{style:{fontSize:12.5,color:this.INK,marginBottom:3,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},r.vn||'—'),
+          h('div',{style:{fontSize:11,color:this.MUTE,fontFamily:"'IBM Plex Mono',monospace"}},this.fdate(r.date)+'  ·  PO '+r.po+'  ·  '+(r.dept||'—')),
+          (!isPend&&r.apl&&r.apl.length)? h('div',{style:{marginTop:6,display:'flex',flexWrap:'wrap',gap:6}}, r.apl.filter(a=>a.st==='Open').map((a,j)=>h('span',{key:j,style:{fontFamily:"'IBM Plex Mono',monospace",fontSize:11,padding:'2px 7px',borderRadius:6,background:'#e3f1f2',color:this.TEAL}},a.d))):null)
+      : h('div',{key:i,onClick:()=>this.setState({sel:r.po,docList:null}),style:{display:'grid',gridTemplateColumns:cols,padding:'9px 16px',borderBottom:'1px solid #f0f3f3',cursor:'pointer',fontSize:12,alignItems:'center'},
+          onMouseEnter:e=>e.currentTarget.style.background='#f8fafa',onMouseLeave:e=>e.currentTarget.style.background='#fff'},
+          h('div',{style:{fontFamily:"'IBM Plex Mono',monospace",fontWeight:600,color:this.INK}},r.d),
+          h('div',{style:{fontFamily:"'IBM Plex Mono',monospace",color:this.MUTE,fontSize:11}},this.fdate(r.date)),
+          h('div',{style:{paddingRight:10,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',color:this.INK}},r.vn||'—'),
+          h('div',{style:{fontFamily:"'IBM Plex Mono',monospace",fontSize:11,color:this.MUTE}},(r.dept||'—')+'/'+(r.wh||'')),
+          isPend? h('div',{style:{fontSize:11.5,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',color:this.INK}},r.pn||'—')
+                : h('div',{style:{display:'flex',flexWrap:'wrap',gap:5}}, (r.apl||[]).filter(a=>a.st==='Open').slice(0,3).map((a,j)=>h('span',{key:j,style:{fontFamily:"'IBM Plex Mono',monospace",fontSize:10.5,padding:'2px 6px',borderRadius:5,background:'#e3f1f2',color:this.TEAL}},a.d))),
+          h('div',{style:{textAlign:'right',fontFamily:"'IBM Plex Mono',monospace",fontWeight:600,color:this.INK}},this.fmtN(r.val)));
+    return h('div',{onClick:close,style:{position:'fixed',inset:0,background:'rgba(18,32,38,.42)',zIndex:55,display:'flex',justifyContent:'center',alignItems:'flex-start',padding:R.isMobile?'0':'40px 20px',overflowY:'auto',animation:'overlayIn .15s ease'}},
+      h('div',{onClick:e=>e.stopPropagation(),style:{background:'#fff',borderRadius:R.isMobile?0:16,width:'100%',maxWidth:860,minHeight:R.isMobile?'100vh':'auto',maxHeight:R.isMobile?'none':'86vh',display:'flex',flexDirection:'column',boxShadow:'0 24px 60px rgba(10,25,30,.28)',animation:'sheetIn .22s cubic-bezier(.2,.7,.3,1)',overflow:'hidden'}},
+        h('div',{style:{padding:R.isMobile?'16px 18px':'20px 24px',borderBottom:'1px solid '+this.LINE,display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:16}},
+          h('div',null,
+            h('div',{style:{fontSize:R.isMobile?16:18,fontWeight:700,marginBottom:4}},title),
+            h('div',{style:{fontSize:12,color:this.MUTE,lineHeight:1.5}},sub),
+            h('div',{style:{fontSize:12.5,color:this.INK,marginTop:7}},'พบ ',h('b',{style:{fontFamily:"'IBM Plex Mono',monospace"}},this.fmtN(list.length)),' รายการ · มูลค่ารวม ',h('b',{style:{fontFamily:"'IBM Plex Mono',monospace"}},'฿'+this.fmtN(total)))),
+          h('button',{onClick:close,style:{border:'1px solid '+this.LINE,background:'#fff',width:34,height:34,borderRadius:9,cursor:'pointer',fontSize:16,color:this.MUTE,flexShrink:0}},'✕')),
+        h('div',{style:{flex:1,overflowY:'auto',minHeight:120}}, headRow,
+          list.length? list.map(rowEl) : h('div',{style:{padding:'44px',textAlign:'center',color:this.MUTE,fontSize:13}},'ไม่มีรายการในกลุ่มนี้ (ตามตัวกรองปัจจุบัน)')),
+        h('div',{style:{padding:'10px 18px',borderTop:'1px solid '+this.LINE,fontSize:11.5,color:this.MUTE,textAlign:'center'}},'แตะรายการเพื่อเปิดใบสั่งซื้อต้นทาง')));
+  }
+
+  // ---------- print report ----------
+  printReport(){
+    const h=React.createElement; const rows=this.currentRows(); const cap=1500; const truncated=rows.length>cap; const show=truncated?rows.slice(0,cap):rows;
+    const M=this.derive(this.scoped()); const s=this.D.summary; const f=this.state.f;
+    const close=()=>this.setState({printOpen:false});
+    const fl={prefix:'ชุดเอกสาร',vendor:'ผู้ขาย',wh:'คลัง',dept:'แผนก',person:'ผู้รับผิดชอบ'}; const fchips=[];
+    Object.keys(fl).forEach(k=>{ if(f[k]) fchips.push(fl[k]+': '+f[k]); });
+    if(f.from||f.to) fchips.push('วันที่เอกสาร '+(f.from||'…')+' – '+(f.to||'…'));
+    if(f.q) fchips.push('ค้นหา: '+f.q);
+    const tabName={all:'ทั้งหมด',await:'รอรับของ',partial:'รับบางส่วน',overdue:'เกินกำหนด',full:'รับครบ'}[this.state.tab];
+    const th=(t,al)=>h('th',{style:{border:'1px solid #c9d3d6',padding:'4px 6px',textAlign:al||'left',background:'#eef3f4',fontWeight:600,whiteSpace:'nowrap'}},t);
+    const td=(v,al,mono,color)=>h('td',{style:{border:'1px solid #d8e0e2',padding:'3px 6px',textAlign:al||'left',fontFamily:mono?"'IBM Plex Mono',monospace":'inherit',color:color||'#16242b'}},v);
+    const kpi=(label,val,color)=>h('div',{style:{border:'1px solid #d8e0e2',borderRadius:8,padding:'8px 11px',minWidth:120}},
+      h('div',{style:{fontSize:10,color:'#64777d',marginBottom:3}},label), h('div',{style:{fontSize:17,fontWeight:700,fontFamily:"'IBM Plex Mono',monospace",color:color||'#16242b'}},val));
+    return h('div',{id:'print-report',style:{position:'fixed',inset:0,background:'#fff',zIndex:90,overflowY:'auto'}},
+      h('div',{className:'no-print',style:{position:'sticky',top:0,display:'flex',justifyContent:'space-between',alignItems:'center',gap:12,padding:'12px 18px',borderBottom:'1px solid '+this.LINE,background:'#fff',zIndex:2}},
+        h('div',{style:{fontSize:13,color:this.MUTE}},'ตัวอย่างก่อนพิมพ์ · ',h('b',{style:{color:this.INK}},this.fmtN(rows.length)),' รายการ', truncated?h('span',{style:{color:this.RED}},'  (พิมพ์ '+cap+' แรก — กรองข้อมูลเพื่อลดจำนวน)'):null),
+        h('div',{style:{display:'flex',gap:9}},
+          h('button',{onClick:()=>window.print(),style:{padding:'9px 18px',border:'none',borderRadius:9,background:this.TEAL,color:'#fff',fontSize:13,fontWeight:600,cursor:'pointer'}},'🖨 พิมพ์ / บันทึก PDF'),
+          h('button',{onClick:close,style:{padding:'9px 16px',border:'1px solid '+this.LINE,background:'#fff',borderRadius:9,fontSize:13,color:this.INK,cursor:'pointer'}},'ปิด'))),
+      h('div',{style:{padding:'22px 26px',maxWidth:1180,margin:'0 auto',color:'#16242b'}},
+        h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:16,borderBottom:'2px solid '+this.INK,paddingBottom:12,marginBottom:14}},
+          h('div',null,
+            h('div',{style:{fontSize:19,fontWeight:700}},'รายงานติดตามสถานะใบสั่งซื้อ'),
+            h('div',{style:{fontSize:12.5,color:this.MUTE,marginTop:3}},'โรงพยาบาลธรรมศาสตร์เฉลิมพระเกียรติ · SAP Business One'),
+            h('div',{style:{fontSize:12,color:this.MUTE,marginTop:2}},'มุมมอง: ',h('b',{style:{color:this.INK}},tabName), fchips.length? ' · '+fchips.join(' · ') : ' · ไม่มีตัวกรอง')),
+          h('div',{style:{textAlign:'right',fontSize:11.5,color:this.MUTE,lineHeight:1.6}},
+            h('div',null,'ช่วงข้อมูล ',h('b',{style:{color:this.INK,fontFamily:"'IBM Plex Mono',monospace"}},s.dateMin+' – '+s.dateMax)),
+            h('div',null,'พิมพ์เมื่อ ',h('b',{style:{color:this.INK,fontFamily:"'IBM Plex Mono',monospace"}},new Date().toLocaleString('th-TH'))))),
+        h('div',{style:{display:'flex',flexWrap:'wrap',gap:10,marginBottom:16}},
+          kpi('ใบสั่งซื้อ (ในมุมมอง)',this.fmtN(M.totalPO)+' ใบ'),
+          kpi('รอรับของ',this.fmtN(M.track.await)+' ใบ',this.TRACK.await.c),
+          kpi('รับบางส่วน',this.fmtN(M.track.partial)+' ใบ',this.TRACK.partial.c),
+          kpi('เกินกำหนดส่ง',this.fmtN(M.overdue)+' ใบ',this.RED),
+          kpi('มูลค่าค้างรับ','฿'+this.fmtM(M.valAwait)+(M.valAwait>=1e6?' ลบ.':''),this.TRACK.await.c),
+          kpi('มูลค่ารวม','฿'+this.fmtM(M.totalValue)+(M.totalValue>=1e6?' ลบ.':''))),
+        h('table',{style:{width:'100%',borderCollapse:'collapse',fontSize:10.5}},
+          h('thead',null, h('tr',null, th('#'),th('เลขที่ PO'),th('สถานะ'),th('วันที่เอกสาร'),th('กำหนดส่ง'),th('เกิน(วัน)','right'),th('ผู้ขาย'),th('แผนก/คลัง'),th('ผู้รับผิดชอบ'),th('รับแล้ว','right'),th('มูลค่า (฿)','right'),th('GR','right'),th('INV','right'))),
+          h('tbody',null, show.map((r,i)=> h('tr',{key:r.doc,className:'pr-row'},
+            td(i+1,'right',true), td(r.doc,'left',true), td(this.TRACK[r.tr].label,'left',false,this.TRACK[r.tr].c),
+            td(this.fdate(r.post),'left',true), td(this.fdate(r.deliv),'left',true,r.od?this.RED:null),
+            td(r.od?this.fmtN(r.odDays):'—','right',true,r.od?this.RED:'#9aa'),
+            td(r.vn||'—'), td((r.dept||'—')+'/'+(r.wh||''),'left',true), td(r.pn||'—'),
+            td(r.rp+'%','right',true), td(this.fmtN(r.val),'right',true), td(r.gd||'—','right',true), td(r.ap||'—','right',true))))),
+        h('div',{style:{marginTop:14,fontSize:10.5,color:this.MUTE,display:'flex',justifyContent:'space-between'}},
+          h('div',null,'รวม ',h('b',null,this.fmtN(show.length)),' รายการในรายงานนี้'),
+          h('div',null,'ระบบติดตามสถานะใบสั่งซื้อ · สร้างจากข้อมูล SAP B1'))));
+  }
+}
+</script>
+</body>
+</html>
