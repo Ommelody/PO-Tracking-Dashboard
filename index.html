@@ -13,6 +13,7 @@
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="po-data.js"></script>
 <script src="xlsx-parse.js"></script>
+<script src="xlsx-export.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
 <script src="firebase-config.js"></script>
@@ -30,11 +31,10 @@
   @keyframes overlayIn{from{opacity:0}to{opacity:1}}
   @keyframes sheetIn{from{opacity:0;transform:translateY(18px) scale(.99)}to{opacity:1;transform:translateY(0) scale(1)}}
   @media print {
-    body * { visibility:hidden !important; }
-    #print-report, #print-report * { visibility:visible !important; }
-    #print-report { position:absolute !important; left:0 !important; top:0 !important; width:100% !important; padding:0 !important; background:#fff !important; }
-    .no-print, .no-print * { visibility:hidden !important; display:none !important; }
+    .no-print { display:none !important; }
     .pr-row { page-break-inside:avoid; }
+    thead { display:table-header-group; }
+    tr { page-break-inside:avoid; }
     @page { size: A4 landscape; margin: 9mm; }
   }
 </style>
@@ -154,6 +154,7 @@ class Component extends DCLogic {
   renderVals(){
     if(!this.state.ready) return { app:this.loading() };
     const h=React.createElement; const R=this.rp(); this.R=R;
+    if(this.state.printOpen){ return { app: this.printReport() }; }
     const scope=this.scoped(); const M=this.derive(scope);
     this._scopedDocSet = new Set(scope.map(r=>r.doc));
     return { app: h('div',{style:{maxWidth:1340,margin:'0 auto',padding:R.isMobile?'0 12px 44px':'0 28px 64px'}},
@@ -184,7 +185,7 @@ class Component extends DCLogic {
           h('div',{style:{width:34,height:34,borderRadius:9,background:this.TEAL,display:'flex',alignItems:'center',justifyContent:'center',color:'#fff',fontWeight:700,fontSize:17,fontFamily:"'IBM Plex Mono',monospace"}},'PO'),
           h('div',{style:{fontSize:12,fontWeight:600,letterSpacing:1.5,color:this.TEAL,textTransform:'uppercase'}},'Purchase Order Tracking')),
         h('h1',{style:{margin:0,fontSize:R.isMobile?22:27,fontWeight:700,letterSpacing:-.3,lineHeight:1.15}},'ระบบติดตามสถานะใบสั่งซื้อ'),
-        h('div',{style:{marginTop:6,fontSize:R.isMobile?12.5:13.5,color:this.MUTE}},'ศูนย์การแพทย์ธรรมศาสตร์ · SAP B1 · PO ↔ รับของ ↔ ตั้งหนี้')),
+        h('div',{style:{marginTop:6,fontSize:R.isMobile?12.5:13.5,color:this.MUTE}},'รพ.ธรรมศาสตร์เฉลิมพระเกียรติ · SAP B1 · PO ↔ รับของ ↔ ตั้งหนี้')),
       h('div',{style:{display:'flex',flexDirection:'column',alignItems:R.isMobile?'stretch':'flex-end',gap:10}},
         h('button',{onClick:()=>this.setState({upOpen:true}),
           style:{display:'flex',alignItems:'center',justifyContent:'center',gap:8,padding:'11px 16px',background:this.TEAL,color:'#fff',border:'none',borderRadius:10,fontSize:13.5,fontWeight:600,cursor:'pointer',boxShadow:'0 1px 2px rgba(15,124,128,.3)'}},
@@ -430,6 +431,7 @@ class Component extends DCLogic {
               background:this.state.tab===t.k?(t.c||this.INK):'#f1f5f5',color:this.state.tab===t.k?'#fff':this.MUTE,display:'flex',alignItems:'center',gap:6}},
             t.label, h('span',{style:{fontFamily:"'IBM Plex Mono',monospace",fontSize:11,opacity:.85}},this.fmtN(t.n))))),
         h('div',{style:{flex:1}}),
+        h('button',{onClick:()=>this.exportExcel(),style:{display:'flex',alignItems:'center',gap:6,padding:'7px 13px',border:'1px solid '+this.LINE,background:'#fff',borderRadius:8,fontSize:12.5,color:this.TRACK.full.c,cursor:'pointer',fontWeight:600}}, h('span',null,'⬇'),'Excel'),
         h('button',{onClick:()=>this.setState({printOpen:true}),style:{display:'flex',alignItems:'center',gap:6,padding:'7px 13px',border:'1px solid '+this.LINE,background:'#fff',borderRadius:8,fontSize:12.5,color:this.INK,cursor:'pointer',fontWeight:500}}, h('span',null,'🖨'),'พิมพ์รายงาน'),
         R.cardMode? null : h('div',{style:{fontSize:12,color:this.MUTE}},'เรียงตาม: ',h('b',{style:{color:this.INK}}, this.sortLabel()))),
       R.cardMode? this.cardList(view) :
@@ -694,6 +696,33 @@ class Component extends DCLogic {
         h('div',{style:{padding:'10px 18px',borderTop:'1px solid '+this.LINE,fontSize:11.5,color:this.MUTE,textAlign:'center'}},'แตะรายการเพื่อเปิดใบสั่งซื้อต้นทาง')));
   }
 
+  // ---------- excel export ----------
+  exportExcel(){
+    if(!window.XLSXWrite){ this.setState({toast:'ตัวส่งออก Excel ยังไม่พร้อม ลองใหม่อีกครั้ง'}); clearTimeout(this._tt); this._tt=setTimeout(()=>this.setState({toast:''}),3000); return; }
+    const rows=this.currentRows(); const TL={full:'รับครบแล้ว',partial:'รับบางส่วน',await:'รอรับของ'};
+    const cols=[
+      {header:'สถานะ',key:'status',width:12},{header:'เกินกำหนด (วัน)',key:'odDays',num:true,width:13},
+      {header:'เลขที่ PO',key:'doc',width:14},{header:'ชุดเอกสาร',key:'pf',width:10},
+      {header:'วันที่เอกสาร',key:'post',width:12},{header:'กำหนดส่ง',key:'deliv',width:12},
+      {header:'รหัสผู้ขาย',key:'vc',width:12},{header:'ผู้ขาย',key:'vn',width:34},
+      {header:'แผนก',key:'dept',width:12},{header:'คลัง',key:'wh',width:12},
+      {header:'ผู้รับผิดชอบ',key:'pn',width:20},{header:'จำนวนรายการ',key:'ln',num:true,width:11},
+      {header:'รับแล้ว (%)',key:'rp',num:true,width:10},{header:'จำนวนค้างรับ',key:'oq',num:true,width:12},
+      {header:'มูลค่า (บาท)',key:'val',num:true,width:15},{header:'จำนวน GR',key:'gd',num:true,width:9},
+      {header:'จำนวนใบตั้งหนี้',key:'ap',num:true,width:12},{header:'หมายเหตุ',key:'rm',width:30}
+    ];
+    const data=rows.map(r=>({ status:TL[r.tr]||r.tr, odDays:r.od?r.odDays:'', doc:r.doc, pf:r.pf,
+      post:this.fdate(r.post), deliv:this.fdate(r.deliv), vc:r.vc, vn:r.vn, dept:r.dept, wh:r.wh,
+      pn:r.pn, ln:r.ln, rp:r.rp, oq:r.oq, val:r.val, gd:r.gd, ap:r.ap, rm:r.rm }));
+    try{
+      const blob=window.XLSXWrite.build(cols, data, 'PO Tracking');
+      const d=new Date(); const fn='PO_Tracking_'+d.getFullYear()+String(d.getMonth()+1).padStart(2,'0')+String(d.getDate()).padStart(2,'0')+'.xlsx';
+      window.XLSXWrite.download(blob, fn);
+      this.setState({toast:'ส่งออก Excel '+this.fmtN(rows.length)+' รายการแล้ว'});
+    }catch(e){ this.setState({toast:'ส่งออกไม่สำเร็จ: '+(e.message||e)}); }
+    clearTimeout(this._tt); this._tt=setTimeout(()=>this.setState({toast:''}),3800);
+  }
+
   // ---------- print report ----------
   printReport(){
     const h=React.createElement; const rows=this.currentRows(); const cap=1500; const truncated=rows.length>cap; const show=truncated?rows.slice(0,cap):rows;
@@ -708,17 +737,18 @@ class Component extends DCLogic {
     const td=(v,al,mono,color)=>h('td',{style:{border:'1px solid #d8e0e2',padding:'3px 6px',textAlign:al||'left',fontFamily:mono?"'IBM Plex Mono',monospace":'inherit',color:color||'#16242b'}},v);
     const kpi=(label,val,color)=>h('div',{style:{border:'1px solid #d8e0e2',borderRadius:8,padding:'8px 11px',minWidth:120}},
       h('div',{style:{fontSize:10,color:'#64777d',marginBottom:3}},label), h('div',{style:{fontSize:17,fontWeight:700,fontFamily:"'IBM Plex Mono',monospace",color:color||'#16242b'}},val));
-    return h('div',{id:'print-report',style:{position:'fixed',inset:0,background:'#fff',zIndex:90,overflowY:'auto'}},
-      h('div',{className:'no-print',style:{position:'sticky',top:0,display:'flex',justifyContent:'space-between',alignItems:'center',gap:12,padding:'12px 18px',borderBottom:'1px solid '+this.LINE,background:'#fff',zIndex:2}},
+    return h('div',{id:'print-report',style:{background:'#fff',minHeight:'100vh'}},
+      h('div',{className:'no-print',style:{position:'sticky',top:0,display:'flex',justifyContent:'space-between',alignItems:'center',gap:12,padding:'12px 18px',borderBottom:'1px solid '+this.LINE,background:'#fff',zIndex:2,flexWrap:'wrap'}},
         h('div',{style:{fontSize:13,color:this.MUTE}},'ตัวอย่างก่อนพิมพ์ · ',h('b',{style:{color:this.INK}},this.fmtN(rows.length)),' รายการ', truncated?h('span',{style:{color:this.RED}},'  (พิมพ์ '+cap+' แรก — กรองข้อมูลเพื่อลดจำนวน)'):null),
-        h('div',{style:{display:'flex',gap:9}},
+        h('div',{style:{display:'flex',gap:9,flexWrap:'wrap'}},
+          h('button',{onClick:()=>this.exportExcel(),style:{padding:'9px 16px',border:'1px solid '+this.LINE,borderRadius:9,background:'#fff',color:this.TRACK.full.c,fontSize:13,fontWeight:600,cursor:'pointer'}},'⬇ Export Excel'),
           h('button',{onClick:()=>window.print(),style:{padding:'9px 18px',border:'none',borderRadius:9,background:this.TEAL,color:'#fff',fontSize:13,fontWeight:600,cursor:'pointer'}},'🖨 พิมพ์ / บันทึก PDF'),
           h('button',{onClick:close,style:{padding:'9px 16px',border:'1px solid '+this.LINE,background:'#fff',borderRadius:9,fontSize:13,color:this.INK,cursor:'pointer'}},'ปิด'))),
       h('div',{style:{padding:'22px 26px',maxWidth:1180,margin:'0 auto',color:'#16242b'}},
         h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:16,borderBottom:'2px solid '+this.INK,paddingBottom:12,marginBottom:14}},
           h('div',null,
             h('div',{style:{fontSize:19,fontWeight:700}},'รายงานติดตามสถานะใบสั่งซื้อ'),
-            h('div',{style:{fontSize:12.5,color:this.MUTE,marginTop:3}},'ศูนย์การแพทย์ธรรมศาสตร์ · SAP Business One'),
+            h('div',{style:{fontSize:12.5,color:this.MUTE,marginTop:3}},'โรงพยาบาลธรรมศาสตร์เฉลิมพระเกียรติ · SAP Business One'),
             h('div',{style:{fontSize:12,color:this.MUTE,marginTop:2}},'มุมมอง: ',h('b',{style:{color:this.INK}},tabName), fchips.length? ' · '+fchips.join(' · ') : ' · ไม่มีตัวกรอง')),
           h('div',{style:{textAlign:'right',fontSize:11.5,color:this.MUTE,lineHeight:1.6}},
             h('div',null,'ช่วงข้อมูล ',h('b',{style:{color:this.INK,fontFamily:"'IBM Plex Mono',monospace"}},s.dateMin+' – '+s.dateMax)),
