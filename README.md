@@ -16,10 +16,15 @@ Dashboard ติดตามสถานะใบสั่งซื้อ (PO) �
 | `support.js` | รันไทม์ของหน้า (ต้องมี) |
 | `po-data.js` | ข้อมูลตั้งต้นที่ฝังมา (ใช้ตอนยังไม่เชื่อม Firebase / โหลดสำรอง) |
 | `xlsx-parse.js` | ตัวอ่านไฟล์ Excel + ประมวลผล PO/GR |
+| `xlsx-export.js` | ตัวสร้างไฟล์ Excel (.xlsx) สำหรับปุ่ม Export |
 | `firebase-store.js` | ตัวอ่าน/เขียนข้อมูลกับ Firestore |
 | `firebase-config.js` | **ไฟล์ที่คุณต้องแก้** — ใส่คอนฟิก Firebase ของคุณ |
 | `firestore.rules` | กฎความปลอดภัยของ Firestore (นำไปวางใน Firebase Console) |
+| `manifest.webmanifest` | ไฟล์ PWA สำหรับติดตั้งลงหน้าจอโฮม (Android/iOS) |
+| `icon-*.png` | ไอคอนแอป/favicon (32/180/192/512 + maskable) |
 | `.nojekyll` | บอก GitHub Pages ไม่ต้องประมวลผลด้วย Jekyll |
+
+> **ติดตั้งลงหน้าจอโฮม (มือถือ):** เปิดเว็บที่ hosting แล้ว — Android (Chrome): เมนู ⋮ → *เพิ่มลงในหน้าจอหลัก* · iOS (Safari): ปุ่มแชร์ → *เพิ่มไปยังหน้าจอโฮม* จะได้ไอคอน "PO Tracking" เปิดแบบเต็มจอเหมือนแอป (รองรับ safe-area + แถบเมนูล่าง)
 
 ---
 

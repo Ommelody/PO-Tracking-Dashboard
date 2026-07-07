@@ -8,6 +8,18 @@
 <body>
 <x-dc>
 <helmet>
+<title>PO Tracking</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f7c80">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="PO Tracking">
+<meta name="application-name" content="PO Tracking">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="32x32" href="icon-32.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-180.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -22,6 +34,7 @@
   *{box-sizing:border-box}
   html,body{margin:0;padding:0}
   body{background:#eef1f2;font-family:'IBM Plex Sans Thai',system-ui,sans-serif;color:#16242b;-webkit-font-smoothing:antialiased}
+  #root{ --safe-t:env(safe-area-inset-top,0px); --safe-b:env(safe-area-inset-bottom,0px); --safe-l:env(safe-area-inset-left,0px); --safe-r:env(safe-area-inset-right,0px); }
   ::-webkit-scrollbar{width:10px;height:10px}
   ::-webkit-scrollbar-thumb{background:#c2cdcf;border-radius:6px;border:2px solid #eef1f2}
   ::-webkit-scrollbar-track{background:transparent}
@@ -67,16 +80,18 @@ class Component extends DCLogic {
     f:{ q:'', prefix:'', vendor:'', wh:'', dept:'', person:'', from:'', to:'' },
     sortKey:'urgent', sortDir:1, page:0, perPage:25, sel:null,
     upOpen:false, up:{ po:null, gr:null, ap:null, busy:false, err:'', stage:'', note:'' }, toast:'',
-    cloud:{ state:'init' }, docList:null, printOpen:false
+    cloud:{ state:'init' }, docList:null, printOpen:false, fbHelp:false
   };
 
   componentDidMount(){
-    this._onResize=()=>{ if(this._raf) return; this._raf=requestAnimationFrame(()=>{ this._raf=null; const w=window.innerWidth; if(w!==this.state.vw) this.setState({vw:w}); }); };
+    this._winW=()=>window.innerWidth||document.documentElement.clientWidth||1200;
+    this._onResize=()=>{ clearTimeout(this._rt); this._rt=setTimeout(()=>{ const w=this._winW(); if(w!==this.state.vw) this.setState({vw:w}); },120); };
     window.addEventListener('resize',this._onResize);
-    const t=()=>{ if(window.PODATA){ this.D=window.PODATA; this.enrich(this.D); this.setState({ready:true,vw:window.innerWidth}); this.syncFromCloud(); } else setTimeout(t,60); };
+    window.addEventListener('orientationchange',this._onResize);
+    const t=()=>{ if(window.PODATA){ this.D=window.PODATA; this.enrich(this.D); this.setState({ready:true,vw:this._winW()}); this.syncFromCloud(); } else setTimeout(t,60); };
     t();
   }
-  componentWillUnmount(){ if(this._onResize) window.removeEventListener('resize',this._onResize); }
+  componentWillUnmount(){ if(this._onResize){ window.removeEventListener('resize',this._onResize); window.removeEventListener('orientationchange',this._onResize); } }
 
   // recompute overdue + days-overdue against the real current date (keeps the tracker live)
   todayNum(){ const d=new Date(); return d.getFullYear()*10000+(d.getMonth()+1)*100+d.getDate(); }
@@ -157,13 +172,20 @@ class Component extends DCLogic {
     if(this.state.printOpen){ return { app: this.printReport() }; }
     const scope=this.scoped(); const M=this.derive(scope);
     this._scopedDocSet = new Set(scope.map(r=>r.doc));
-    return { app: h('div',{style:{maxWidth:1340,margin:'0 auto',padding:R.isMobile?'0 12px 44px':'0 28px 64px'}},
-      this.header(), this.filterBar(scope.length), this.kpis(M), this.pipeline(),
-      this.attentionStrip(),
-      this.charts(M), this.prefixSection(), this.peopleVendor(), this.tableSection(scope),
+    const pad = R.isMobile
+      ? '0 calc(12px + var(--safe-r)) calc(80px + var(--safe-b)) calc(12px + var(--safe-l))'
+      : '0 28px 64px';
+    return { app: h('div',null,
+      h('div',{style:{maxWidth:1340,margin:'0 auto',padding:pad}},
+        this.header(),
+        h('div',{ref:e=>this._elFilter=e}, this.filterBar(scope.length)),
+        this.kpis(M), this.pipeline(), this.attentionStrip(),
+        this.charts(M), this.prefixSection(), this.peopleVendor(),
+        h('div',{ref:e=>this._elTable=e}, this.tableSection(scope))),
+      R.isMobile ? this.bottomNav() : null,
       this.state.sel!=null ? this.modal() : null,
+      this.state.fbHelp ? this.fbHelpModal() : null,
       this.state.docList ? this.docListModal() : null,
-      this.state.printOpen ? this.printReport() : null,
       this.state.upOpen ? this.uploadModal() : null,
       this.state.toast ? this.toastEl() : null
     )};
@@ -179,13 +201,13 @@ class Component extends DCLogic {
   // ---------- header ----------
   header(){
     const h=React.createElement; const s=this.D.summary; const R=this.R;
-    return h('div',{style:{display:'flex',alignItems:R.isMobile?'stretch':'flex-end',flexDirection:R.isMobile?'column':'row',justifyContent:'space-between',gap:R.isMobile?14:24,flexWrap:'wrap',padding:R.isMobile?'20px 0 14px':'30px 0 18px'}},
+    return h('div',{style:{display:'flex',alignItems:R.isMobile?'stretch':'flex-end',flexDirection:R.isMobile?'column':'row',justifyContent:'space-between',gap:R.isMobile?14:24,flexWrap:'wrap',padding:R.isMobile?'calc(18px + var(--safe-t)) 0 14px':'30px 0 18px'}},
       h('div',null,
         h('div',{style:{display:'flex',alignItems:'center',gap:11,marginBottom:8}},
           h('div',{style:{width:34,height:34,borderRadius:9,background:this.TEAL,display:'flex',alignItems:'center',justifyContent:'center',color:'#fff',fontWeight:700,fontSize:17,fontFamily:"'IBM Plex Mono',monospace"}},'PO'),
           h('div',{style:{fontSize:12,fontWeight:600,letterSpacing:1.5,color:this.TEAL,textTransform:'uppercase'}},'Purchase Order Tracking')),
         h('h1',{style:{margin:0,fontSize:R.isMobile?22:27,fontWeight:700,letterSpacing:-.3,lineHeight:1.15}},'ระบบติดตามสถานะใบสั่งซื้อ'),
-        h('div',{style:{marginTop:6,fontSize:R.isMobile?12.5:13.5,color:this.MUTE}},'ศูนย์การแพทย์ธรรมศาสตร์ · SAP B1 · PO ↔ รับของ ↔ ตั้งหนี้')),
+        h('div',{style:{marginTop:6,fontSize:R.isMobile?12.5:13.5,color:this.MUTE}},'รพ.ธรรมศาสตร์เฉลิมพระเกียรติ · SAP B1 · PO ↔ รับของ ↔ ตั้งหนี้')),
       h('div',{style:{display:'flex',flexDirection:'column',alignItems:R.isMobile?'stretch':'flex-end',gap:10}},
         h('button',{onClick:()=>this.setState({upOpen:true}),
           style:{display:'flex',alignItems:'center',justifyContent:'center',gap:8,padding:'11px 16px',background:this.TEAL,color:'#fff',border:'none',borderRadius:10,fontSize:13.5,fontWeight:600,cursor:'pointer',boxShadow:'0 1px 2px rgba(15,124,128,.3)'}},
@@ -206,10 +228,12 @@ class Component extends DCLogic {
       error:{t:'เชื่อม Firebase ไม่สำเร็จ',col:this.RED,bg:this.REDBG,dot:this.RED} };
     const m=map[c.state]||map.init; const meta=c.meta; let when=null;
     if(meta&&meta.updatedAtClient){ try{ when=new Date(meta.updatedAtClient).toLocaleString('th-TH',{day:'2-digit',month:'short',year:'2-digit',hour:'2-digit',minute:'2-digit'}); }catch(e){} }
+    const needSetup = (c.state==='unconfigured'||c.state==='offline'||c.state==='error');
     return h('div',{style:{display:'flex',alignItems:'center',gap:7,flexWrap:'wrap'}},
-      h('div',{style:{display:'inline-flex',alignItems:'center',gap:7,padding:'5px 11px',borderRadius:20,background:m.bg,color:m.col,fontSize:11.5,fontWeight:600}},
+      h('div',{onClick: needSetup? ()=>this.setState({fbHelp:true}):undefined,style:{display:'inline-flex',alignItems:'center',gap:7,padding:'5px 11px',borderRadius:20,background:m.bg,color:m.col,fontSize:11.5,fontWeight:600,cursor:needSetup?'pointer':'default'}},
         c.state==='loading'? h('span',{style:{width:11,height:11,borderRadius:'50%',border:'2px solid '+this.TEAL,borderTopColor:'transparent',animation:'spin .8s linear infinite'}}) : h('span',{style:{width:7,height:7,borderRadius:'50%',background:m.dot}}),
-        m.t, when? h('span',{style:{fontWeight:400,opacity:.85}},'· '+when):null, meta&&meta.note? h('span',{style:{fontWeight:400,opacity:.85}},'· '+meta.note):null),
+        m.t, when? h('span',{style:{fontWeight:400,opacity:.85}},'· '+when):null, meta&&meta.note? h('span',{style:{fontWeight:400,opacity:.85}},'· '+meta.note):null,
+        needSetup? h('span',{style:{fontWeight:700,textDecoration:'underline',marginLeft:2}},'· วิธีตั้งค่า'):null),
       (c.state==='connected'||c.state==='error')? h('button',{onClick:()=>this.syncFromCloud(),title:'รีเฟรชจากฐานข้อมูล',
         style:{border:'1px solid '+this.LINE,background:'#fff',borderRadius:8,width:27,height:27,cursor:'pointer',color:this.MUTE,fontSize:13,lineHeight:1}},'⟳'):null);
   }
@@ -696,6 +720,55 @@ class Component extends DCLogic {
         h('div',{style:{padding:'10px 18px',borderTop:'1px solid '+this.LINE,fontSize:11.5,color:this.MUTE,textAlign:'center'}},'แตะรายการเพื่อเปิดใบสั่งซื้อต้นทาง')));
   }
 
+  // ---------- firebase setup help ----------
+  fbHelpModal(){
+    const h=React.createElement; const R=this.R; const close=()=>this.setState({fbHelp:false});
+    const step=(n,title,body)=> h('div',{style:{display:'flex',gap:12,marginBottom:16}},
+      h('div',{style:{width:26,height:26,borderRadius:'50%',background:this.TEAL,color:'#fff',fontWeight:700,fontSize:13,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,fontFamily:"'IBM Plex Mono',monospace"}},n),
+      h('div',{style:{minWidth:0}}, h('div',{style:{fontSize:13.5,fontWeight:600,color:this.INK,marginBottom:3}},title), h('div',{style:{fontSize:12.5,color:this.MUTE,lineHeight:1.65}},body)));
+    const code='window.FIREBASE_CONFIG = {\n  apiKey: "AIza…",\n  authDomain: "xxx.firebaseapp.com",\n  projectId: "xxx",\n  storageBucket: "xxx.appspot.com",\n  messagingSenderId: "1234567890",\n  appId: "1:1234:web:abcd"\n};';
+    return h('div',{onClick:close,style:{position:'fixed',inset:0,background:'rgba(18,32,38,.42)',zIndex:65,display:'flex',justifyContent:'center',alignItems:'flex-start',padding:R.isMobile?'0':'40px 20px',overflowY:'auto',animation:'overlayIn .15s ease'}},
+      h('div',{onClick:e=>e.stopPropagation(),style:{background:'#fff',borderRadius:R.isMobile?0:16,width:'100%',maxWidth:640,minHeight:R.isMobile?'100vh':'auto',boxShadow:'0 24px 60px rgba(10,25,30,.28)',animation:'sheetIn .22s cubic-bezier(.2,.7,.3,1)',overflow:'hidden'}},
+        h('div',{style:{padding:'20px 24px',borderBottom:'1px solid '+this.LINE,display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:12}},
+          h('div',null, h('div',{style:{fontSize:18,fontWeight:700,marginBottom:4}},'เชื่อมฐานข้อมูลกลาง (ออนไลน์ทุกเครื่อง)'),
+            h('div',{style:{fontSize:12.5,color:this.MUTE,lineHeight:1.5}},'ตอนนี้ยังเป็นโหมดออฟไลน์ เพราะไฟล์ firebase-config.js ยังเป็นค่าตัวอย่าง ทำ 4 ขั้นนี้ครั้งเดียวจบ')),
+          h('button',{onClick:close,style:{border:'1px solid '+this.LINE,background:'#fff',width:32,height:32,borderRadius:9,cursor:'pointer',fontSize:16,color:this.MUTE,flexShrink:0}},'✕')),
+        h('div',{style:{padding:'20px 24px'}},
+          step('1','สร้างโปรเจกต์ Firebase', h('span',null,'เข้า console.firebase.google.com → Add project → ตั้งชื่อ (เช่น po-tracking) → สร้างให้เสร็จ')),
+          step('2','เปิด Cloud Firestore', h('span',null,'เมนู Build → ',h('b',{style:{color:this.INK}},'Firestore Database'),' (ไม่ใช่ Realtime Database) → Create database → Production mode → location asia-southeast1 → แท็บ Rules วางค่าจากไฟล์ firestore.rules → Publish')),
+          step('3','คัดลอกค่าคอนฟิก', h('span',null,'เฟือง ⚙ → Project settings → เลื่อนลง Your apps → คลิกไอคอน ',h('b',{style:{fontFamily:"'IBM Plex Mono',monospace",color:this.INK}},'</>'),' (Web) → ตั้งชื่อ → Register app → จะได้ออบเจกต์ firebaseConfig')),
+          step('4','วางค่าลงไฟล์ firebase-config.js', h('span',null,'แทนค่า YOUR_… ทั้งหมดด้วยค่าจริง แล้ว push ขึ้น GitHub ทับไฟล์เดิม — ป้ายจะเปลี่ยนเป็น ',h('b',{style:{color:this.TRACK.full.c}},'“เชื่อมฐานข้อมูลกลาง”'),' อัตโนมัติ')),
+          h('div',{style:{background:this.INK,borderRadius:10,padding:'12px 14px',marginTop:4,marginBottom:14,overflowX:'auto'}},
+            h('pre',{style:{margin:0,fontSize:11.5,fontFamily:"'IBM Plex Mono',monospace",color:'#cfe3e4',lineHeight:1.6,whiteSpace:'pre'}},code)),
+          h('div',{style:{fontSize:11.5,color:this.MUTE,lineHeight:1.6,padding:'10px 12px',background:this.PANEL,borderRadius:9}},
+            h('b',{style:{color:this.INK}},'หมายเหตุ: '),'ค่าเหล่านี้ไม่ใช่ความลับ (เป็นค่าฝั่งเว็บปกติ) · ใช้ Firestore เท่านั้น อยู่ในแพลนฟรีได้ · ขั้นตอนเต็มอยู่ใน README.md'),
+          h('div',{style:{marginTop:16,display:'flex',justifyContent:'flex-end',gap:9}},
+            h('a',{href:'https://console.firebase.google.com',target:'_blank',style:{padding:'10px 18px',borderRadius:9,background:this.TEAL,color:'#fff',fontSize:13,fontWeight:600,textDecoration:'none'}},'เปิด Firebase Console →')))));
+  }
+
+  // ---------- bottom nav (mobile app shell) ----------
+  scrollToEl(el){ if(el){ const y=el.getBoundingClientRect().top + window.pageYOffset - 8; window.scrollTo({top:Math.max(0,y),behavior:'smooth'}); } }
+  navItem(icon,label,onClick,accent){
+    const h=React.createElement;
+    return h('button',{onClick,style:{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:3,border:'none',background:'transparent',cursor:'pointer',padding:'7px 2px 4px',color:accent?this.TEAL:this.MUTE,minWidth:0}},
+      h('span',{style:{fontSize:19,lineHeight:1}},icon),
+      h('span',{style:{fontSize:10,fontWeight:accent?700:500,whiteSpace:'nowrap'}},label));
+  }
+  bottomNav(){
+    const h=React.createElement;
+    return h('div',{style:{position:'fixed',left:0,right:0,bottom:0,zIndex:40,background:'rgba(255,255,255,.94)',backdropFilter:'blur(10px)',WebkitBackdropFilter:'blur(10px)',borderTop:'1px solid '+this.LINE,boxShadow:'0 -2px 12px rgba(20,40,50,.06)',paddingBottom:'var(--safe-b)'}},
+      h('div',{style:{display:'flex',alignItems:'stretch',height:56,paddingLeft:'var(--safe-l)',paddingRight:'var(--safe-r)'}},
+        this.navItem('▤','ภาพรวม',()=>window.scrollTo({top:0,behavior:'smooth'})),
+        this.navItem('⚲','ตัวกรอง',()=>{ this.setState({filterOpen:true}); setTimeout(()=>this.scrollToEl(this._elFilter),60); }),
+        // center upload FAB
+        h('button',{onClick:()=>this.setState({upOpen:true}),style:{flex:'0 0 auto',width:58,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'flex-start',border:'none',background:'transparent',cursor:'pointer',padding:0,position:'relative'}},
+          h('span',{style:{position:'absolute',top:-16,width:48,height:48,borderRadius:'50%',background:this.TEAL,color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',fontSize:22,fontWeight:700,boxShadow:'0 4px 12px rgba(15,124,128,.4)'}},'↑'),
+          h('span',{style:{marginTop:36,fontSize:10,fontWeight:600,color:this.TEAL}},'อัปโหลด')),
+        this.navItem('☰','รายการ',()=>this.scrollToEl(this._elTable)),
+        this.navItem('🖨','พิมพ์',()=>this.setState({printOpen:true})))
+    );
+  }
+
   // ---------- excel export ----------
   exportExcel(){
     if(!window.XLSXWrite){ this.setState({toast:'ตัวส่งออก Excel ยังไม่พร้อม ลองใหม่อีกครั้ง'}); clearTimeout(this._tt); this._tt=setTimeout(()=>this.setState({toast:''}),3000); return; }
@@ -748,7 +821,7 @@ class Component extends DCLogic {
         h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:16,borderBottom:'2px solid '+this.INK,paddingBottom:12,marginBottom:14}},
           h('div',null,
             h('div',{style:{fontSize:19,fontWeight:700}},'รายงานติดตามสถานะใบสั่งซื้อ'),
-            h('div',{style:{fontSize:12.5,color:this.MUTE,marginTop:3}},'ศูนย์การแพทย์ธรรมศาสตร์ · SAP Business One'),
+            h('div',{style:{fontSize:12.5,color:this.MUTE,marginTop:3}},'โรงพยาบาลธรรมศาสตร์เฉลิมพระเกียรติ · SAP Business One'),
             h('div',{style:{fontSize:12,color:this.MUTE,marginTop:2}},'มุมมอง: ',h('b',{style:{color:this.INK}},tabName), fchips.length? ' · '+fchips.join(' · ') : ' · ไม่มีตัวกรอง')),
           h('div',{style:{textAlign:'right',fontSize:11.5,color:this.MUTE,lineHeight:1.6}},
             h('div',null,'ช่วงข้อมูล ',h('b',{style:{color:this.INK,fontFamily:"'IBM Plex Mono',monospace"}},s.dateMin+' – '+s.dateMax)),
