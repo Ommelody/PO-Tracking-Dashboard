@@ -8,6 +8,22 @@
 <body>
 <x-dc>
 <helmet>
+<script>
+/* ═══════════════════════════════════════════════════════════════
+   ★ ตั้งค่า FIREBASE — แก้เฉพาะ 6 บรรทัดนี้ แล้ว push ขึ้น GitHub
+   ค่าเอามาจาก: console.firebase.google.com → เฟือง ⚙ Project settings
+                → Your apps → ไอคอน </> (Web) → Register app
+   ตราบใดที่ยังเป็น YOUR_... ระบบจะทำงานแบบออฟไลน์ (ไม่ sync ข้ามเครื่อง)
+   ═══════════════════════════════════════════════════════════════ */
+window.FIREBASE_CONFIG = {
+  apiKey: "AIzaSyAVBVf1THiEam98gTAEQgPdyTwAWKuGyQ8",
+  authDomain: "po-purchase-order-tracking.firebaseapp.com",
+  projectId: "po-purchase-order-tracking",
+  storageBucket: "po-purchase-order-tracking.firebasestorage.app",
+  messagingSenderId: "486619149790",
+  appId: "1:486619149790:web:f1e38de23addb958df194f"
+};
+</script>
 <title>PO Tracking</title>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0f7c80">
@@ -73,14 +89,15 @@
 </helmet>
 <div id="root" style="min-height:100vh">{{ app }}</div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1340,&quot;height&quot;:1800}}">
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1340,&quot;height&quot;:1800},&quot;splitThreshold&quot;:{&quot;editor&quot;:&quot;int&quot;,&quot;default&quot;:100000,&quot;tsType&quot;:&quot;number&quot;,&quot;min&quot;:10000,&quot;max&quot;:1000000,&quot;step&quot;:10000,&quot;unit&quot;:&quot;บาท&quot;,&quot;section&quot;:&quot;วิเคราะห์การซื้อซ้ำ&quot;},&quot;minRepeat&quot;:{&quot;editor&quot;:&quot;int&quot;,&quot;default&quot;:3,&quot;tsType&quot;:&quot;number&quot;,&quot;min&quot;:2,&quot;max&quot;:12,&quot;step&quot;:1,&quot;unit&quot;:&quot;ครั้ง&quot;,&quot;section&quot;:&quot;วิเคราะห์การซื้อซ้ำ&quot;}}">
 class Component extends DCLogic {
   state = {
     ready:false, tab:'all', vw:0, filterOpen:false,
     f:{ q:'', prefix:'', vendor:'', wh:'', dept:'', person:'', from:'', to:'' },
     sortKey:'urgent', sortDir:1, page:0, perPage:25, sel:null,
     upOpen:false, up:{ po:null, gr:null, ap:null, busy:false, err:'', stage:'', note:'' }, toast:'',
-    cloud:{ state:'init' }, docList:null, printOpen:false, fbHelp:false
+    cloud:{ state:'init' }, docList:null, printOpen:false, fbHelp:false,
+    view:'main', rpSort:'n', rpTag:'all', rpPage:0, rpSel:null
   };
 
   componentDidMount(){
@@ -169,21 +186,26 @@ class Component extends DCLogic {
   renderVals(){
     if(!this.state.ready) return { app:this.loading() };
     const h=React.createElement; const R=this.rp(); this.R=R;
-    if(this.state.printOpen){ return { app: this.printReport() }; }
+    if(this.state.printOpen){ return { app: this.state.view==='repeat'? this.printRepeat() : this.printReport() }; }
     const scope=this.scoped(); const M=this.derive(scope);
     this._scopedDocSet = new Set(scope.map(r=>r.doc));
     const pad = R.isMobile
       ? '0 calc(12px + var(--safe-r)) calc(80px + var(--safe-b)) calc(12px + var(--safe-l))'
       : '0 28px 64px';
+    const isRepeat = this.state.view==='repeat';
+    const body = isRepeat
+      ? [ this.repeatKpis(), this.repeatLegend(), h('div',{key:'rp',ref:e=>this._elTable=e}, this.repeatSection()) ]
+      : [ this.kpis(M), this.pipeline(), this.attentionStrip(), this.charts(M), this.prefixSection(), this.peopleVendor(),
+          h('div',{key:'tb',ref:e=>this._elTable=e}, this.tableSection(scope)) ];
     return { app: h('div',null,
       h('div',{style:{maxWidth:1340,margin:'0 auto',padding:pad}},
         this.header(),
+        this.viewTabs(),
         h('div',{ref:e=>this._elFilter=e}, this.filterBar(scope.length)),
-        this.kpis(M), this.pipeline(), this.attentionStrip(),
-        this.charts(M), this.prefixSection(), this.peopleVendor(),
-        h('div',{ref:e=>this._elTable=e}, this.tableSection(scope))),
+        body),
       R.isMobile ? this.bottomNav() : null,
       this.state.sel!=null ? this.modal() : null,
+      this.state.rpSel!=null ? this.repeatDrill() : null,
       this.state.fbHelp ? this.fbHelpModal() : null,
       this.state.docList ? this.docListModal() : null,
       this.state.upOpen ? this.uploadModal() : null,
@@ -746,6 +768,324 @@ class Component extends DCLogic {
             h('a',{href:'https://console.firebase.google.com',target:'_blank',style:{padding:'10px 18px',borderRadius:9,background:this.TEAL,color:'#fff',fontSize:13,fontWeight:600,textDecoration:'none'}},'เปิด Firebase Console →')))));
   }
 
+  // ---------- repeat-purchase analysis ----------
+  splitThreshold(){ const v=Number(this.props.splitThreshold); return isFinite(v)&&v>0? v : 100000; }
+  minRepeat(){ const v=Number(this.props.minRepeat); return isFinite(v)&&v>0? v : 3; }
+
+  repeatStats(){
+    const rows=this.scoped();
+    const sig=this.state.f.prefix+'|'+this.state.f.vendor+'|'+this.state.f.wh+'|'+this.state.f.dept+'|'+this.state.f.person+'|'+this.state.f.from+'|'+this.state.f.to+'|'+this.state.f.q+'|'+rows.length+'|'+this.splitThreshold()+'|'+this.minRepeat();
+    if(this._rpCache && this._rpCache.sig===sig) return this._rpCache.data;
+    const TH=this.splitThreshold();
+    const map={};
+    for(const r of rows){
+      const seen=new Set();
+      for(const it of (r.items||[])){
+        const key=it.no||it.desc; if(!key||seen.has(key)) continue; seen.add(key);
+        const e=map[key]||(map[key]={no:it.no,desc:it.desc,unit:it.unit,pos:[],val:0,qty:0,vendors:{},depts:{},single:0});
+        e.pos.push({doc:r.doc,post:r.post,t:this.dnum(r.post),ym:this.ymOf(r.post),qty:it.qty,lineVal:it.total,poVal:r.val,vn:r.vn,dept:r.dept,wh:r.wh,ln:r.ln,tr:r.tr});
+        e.val+=it.total; e.qty+=it.qty;
+        e.vendors[r.vn]=(e.vendors[r.vn]||0)+1;
+        if(r.dept) e.depts[r.dept]=(e.depts[r.dept]||0)+1;
+        if(r.ln===1) e.single++;
+      }
+    }
+    const minN=this.minRepeat(); const out=[];
+    let totalExtra=0, totalSplitItems=0, totalRepeatVal=0;
+    const mergeDocs=new Set();   // นับ "ใบ" แบบไม่ซ้ำ (PO เดียวอาจมีหลายรายการที่ซ้ำ)
+    for(const k in map){
+      const e=map[k]; const n=e.pos.length; if(n<minN) continue;
+      e.pos.sort((a,b)=>a.t-b.t);
+      const gaps=[]; for(let i=1;i<n;i++){ const g=(e.pos[i].t-e.pos[i-1].t); if(g>=0) gaps.push(g); }
+      const avgGap=gaps.length? gaps.reduce((a,b)=>a+b,0)/gaps.length : 0;
+      const mean=avgGap||1;
+      const varr=gaps.length? gaps.reduce((a,b)=>a+Math.pow(b-mean,2),0)/gaps.length : 0;
+      const cv= mean>0? Math.sqrt(varr)/mean : 9;   // ความสม่ำเสมอของรอบสั่ง
+      const bym={}; e.pos.forEach(p=>{ if(p.ym)(bym[p.ym]=bym[p.ym]||[]).push(p); });
+      let extra=0, repMonths=0, splitMonths=0, splitDocs=0;
+      for(const m in bym){
+        const g=bym[m];
+        if(g.length>1){ extra+=g.length-1; repMonths++;
+          for(let gi=1; gi<g.length; gi++) mergeDocs.add(g[gi].doc); }
+        if(g.length>=3){
+          const tot=g.reduce((a,p)=>a+p.poVal,0);
+          const allBelow=g.every(p=>p.poVal<TH);
+          if(allBelow && tot>=TH){ splitMonths++; splitDocs+=g.length; }
+        }
+      }
+      const vendors=Object.keys(e.vendors);
+      const topVendor=vendors.sort((a,b)=>e.vendors[b]-e.vendors[a])[0]||'';
+      const depts=Object.keys(e.depts).sort((a,b)=>e.depts[b]-e.depts[a]);
+      const tags=[];
+      if(n>=12) tags.push('contract');
+      if(n>=6 && cv<0.8 && avgGap>0) tags.push('reorder');
+      if(splitMonths>0) tags.push('split');
+      totalExtra+=extra; if(splitMonths>0) totalSplitItems++; totalRepeatVal+=e.val;
+      out.push({ key:k, no:e.no, desc:e.desc, unit:e.unit, n, qty:Math.round(e.qty*100)/100, val:Math.round(e.val),
+        avgVal:e.val/n, avgGap:Math.round(avgGap/86400000), cv, extra, repMonths, splitMonths, splitDocs,
+        vendorCount:vendors.length, topVendor, dept:depts[0]||'', single:e.single, tags, pos:e.pos,
+        first:e.pos[0].post, last:e.pos[n-1].post });
+    }
+    out.sort((a,b)=>b.n-a.n);
+    const data={ items:out, totalExtra, mergeDocs:mergeDocs.size, totalSplitItems, totalRepeatVal:Math.round(totalRepeatVal), scanned:rows.length,
+      singlePO: rows.filter(r=>r.ln===1).length };
+    this._rpCache={sig,data}; return data;
+  }
+
+  rpFiltered(){
+    const S=this.repeatStats(); const t=this.state.rpTag;
+    let arr=S.items.filter(i=> t==='all'?true : i.tags.indexOf(t)>=0);
+    const k=this.state.rpSort;
+    arr=arr.slice().sort((a,b)=>{
+      if(k==='n') return b.n-a.n;
+      if(k==='extra') return b.extra-a.extra;
+      if(k==='val') return b.val-a.val;
+      if(k==='gap') return (a.avgGap||9999)-(b.avgGap||9999);
+      if(k==='avgVal') return a.avgVal-b.avgVal;
+      return b.n-a.n;
+    });
+    return arr;
+  }
+
+  TAGMETA(){ return {
+    contract:{label:'ควรทำสัญญา', short:'สัญญา', c:'#2273b0', bg:'#e4f0f8', hint:'สั่งซ้ำ 12 ครั้งขึ้นไป — คุ้มที่จะเจรจาราคาคงที่รายปี'},
+    reorder:{label:'ตั้งจุดสั่งซื้อ', short:'สต๊อก', c:'#2f8f6b', bg:'#e6f4ee', hint:'สั่งเป็นรอบสม่ำเสมอ — กำหนดจุดสั่งซื้อใหม่ (reorder point) ได้'},
+    split:{label:'เสี่ยงซอยใบ', short:'ซอยใบ', c:'#c5483b', bg:'#fbe9e7', hint:'เดือนเดียวออก 3 ใบขึ้นไป แต่ละใบต่ำกว่าวงเงิน รวมแล้วเกินวงเงิน'}
+  };}
+
+  viewTabs(){
+    const h=React.createElement; const R=this.R; const v=this.state.view;
+    const tab=(k,icon,label)=> h('button',{onClick:()=>this.setState({view:k}),
+      style:{display:'flex',alignItems:'center',gap:7,padding:R.isMobile?'9px 13px':'10px 18px',border:'none',borderBottom:'2.5px solid '+(v===k?this.TEAL:'transparent'),
+        background:'transparent',color:v===k?this.TEAL:this.MUTE,fontSize:R.isMobile?12.5:13.5,fontWeight:v===k?700:500,cursor:'pointer',fontFamily:'inherit',whiteSpace:'nowrap'}},
+      h('span',{style:{fontSize:15}},icon), label);
+    return h('div',{style:{display:'flex',gap:4,borderBottom:'1px solid '+this.LINE,marginBottom:14,overflowX:'auto'}},
+      tab('main','▤','ภาพรวมใบสั่งซื้อ'), tab('repeat','↻','วิเคราะห์การซื้อซ้ำ'));
+  }
+
+  repeatKpis(){
+    const h=React.createElement; const R=this.R; const S=this.repeatStats();
+    const items=S.items; const splitItems=items.filter(i=>i.splitMonths>0);
+    const contract=items.filter(i=>i.tags.indexOf('contract')>=0);
+    const pct= S.scanned? Math.round(S.singlePO/S.scanned*100):0;
+    const box=(label,val,unit,sub,c)=> h('div',{style:{background:'#fff',border:'1px solid '+this.LINE,borderRadius:14,padding:R.isMobile?'13px':'16px',position:'relative',overflow:'hidden'}},
+      h('div',{style:{position:'absolute',left:0,top:0,bottom:0,width:3,background:c}}),
+      h('div',{style:{fontSize:R.isMobile?11:12,color:this.MUTE,fontWeight:500,marginBottom:8,minHeight:30,lineHeight:1.25}},label),
+      h('div',{style:{display:'flex',alignItems:'baseline',gap:5}},
+        h('div',{style:{fontSize:R.isMobile?21:25,fontWeight:700,fontFamily:"'IBM Plex Mono',monospace",color:c,letterSpacing:-.5}},val),
+        h('div',{style:{fontSize:11,color:this.MUTE}},unit)),
+      h('div',{style:{fontSize:10.5,color:this.MUTE,marginTop:6,lineHeight:1.35}},sub));
+    return h('div',{style:{display:'grid',gridTemplateColumns:'repeat('+(R.isMobile?2:4)+',1fr)',gap:R.isMobile?10:14,marginBottom:14}},
+      box('สินค้าที่สั่งซ้ำบ่อย',this.fmtN(items.length),'รายการ','สั่งตั้งแต่ '+this.minRepeat()+' ครั้งขึ้นไป',this.TEAL),
+      box('ใบสั่งซื้อที่รวมได้',this.fmtN(S.mergeDocs),'ใบ','จาก '+this.fmtN(S.scanned)+' ใบ ('+(S.scanned?Math.round(S.mergeDocs/S.scanned*100):0)+'%) · สินค้าเดิม ซ้ำในเดือนเดียวกัน',this.TRACK.await.c),
+      box('เข้าข่ายซอยใบสั่งซื้อ',this.fmtN(splitItems.length),'รายการ','ต่ำกว่าวงเงิน ฿'+this.fmtN(this.splitThreshold())+' ทุกใบ',this.RED),
+      box('ควรทำสัญญาระยะยาว',this.fmtN(contract.length),'รายการ','มูลค่ารวม ฿'+this.fmtM(contract.reduce((a,i)=>a+i.val,0))+(contract.reduce((a,i)=>a+i.val,0)>=1e6?' ลบ.':''),this.TRACK.partial.c));
+  }
+
+  repeatSection(){
+    const h=React.createElement; const R=this.R; const TM=this.TAGMETA();
+    const S=this.repeatStats(); const arr=this.rpFiltered();
+    const per=R.cardMode?15:25; const pages=Math.max(1,Math.ceil(arr.length/per));
+    const pg=Math.min(this.state.rpPage,pages-1); const view=arr.slice(pg*per,pg*per+per);
+    const counts={all:S.items.length,contract:0,reorder:0,split:0};
+    S.items.forEach(i=>i.tags.forEach(t=>counts[t]++));
+    const chip=(k,label,c)=> h('div',{key:k,onClick:()=>this.setState({rpTag:k,rpPage:0}),
+      style:{cursor:'pointer',padding:'6px 12px',borderRadius:8,fontSize:12.5,fontWeight:this.state.rpTag===k?600:400,
+        background:this.state.rpTag===k?(c||this.INK):'#f1f5f5',color:this.state.rpTag===k?'#fff':this.MUTE,display:'flex',alignItems:'center',gap:6,whiteSpace:'nowrap'}},
+      label, h('span',{style:{fontFamily:"'IBM Plex Mono',monospace",fontSize:11,opacity:.85}},this.fmtN(counts[k])));
+    const sortBtn=(k,label)=> h('option',{key:k,value:k},label);
+    const COLS='minmax(0,1fr) 66px 74px 82px 96px 104px 96px';
+    const head= R.cardMode? null : h('div',{style:{display:'grid',gridTemplateColumns:COLS,padding:'9px 18px',background:this.PANEL,borderBottom:'1px solid '+this.LINE,fontSize:10.5,fontWeight:600,color:this.MUTE,textTransform:'uppercase',letterSpacing:.2}},
+      h('div',null,'รายการสินค้า'), h('div',{style:{textAlign:'right'}},'สั่งซ้ำ'), h('div',{style:{textAlign:'right'}},'รวมได้'),
+      h('div',{style:{textAlign:'right'}},'ทุกๆ (วัน)'), h('div',{style:{textAlign:'right'}},'เฉลี่ย/ใบ'), h('div',{style:{textAlign:'right'}},'มูลค่ารวม'), h('div',{style:{textAlign:'center'}},'สัญญาณ'));
+    const tagPills=(it,small)=> h('div',{style:{display:'flex',gap:4,flexWrap:'wrap',justifyContent:small?'flex-start':'center'}},
+      it.tags.length? it.tags.map(t=>h('span',{key:t,title:TM[t].hint,style:{padding:'2px 7px',borderRadius:20,background:TM[t].bg,color:TM[t].c,fontSize:10,fontWeight:600,whiteSpace:'nowrap'}},TM[t].short)) : h('span',{style:{color:'#c2cdcf',fontSize:11}},'—'));
+    const row=(it,i)=> R.cardMode
+      ? h('div',{key:it.key,onClick:()=>this.setState({rpSel:it.key}),style:{padding:'13px 15px',borderBottom:'1px solid #f0f3f3',cursor:'pointer'}},
+          h('div',{style:{fontSize:13,color:this.INK,fontWeight:600,marginBottom:3,lineHeight:1.35}},it.desc||it.no),
+          h('div',{style:{fontSize:10.5,color:this.MUTE,fontFamily:"'IBM Plex Mono',monospace",marginBottom:8}},it.no+(it.unit?' · '+it.unit:'')),
+          h('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'6px 12px',fontSize:11.5,marginBottom:9}},
+            h('div',null,h('span',{style:{color:this.MUTE}},'สั่งซ้ำ '),h('b',{style:{fontFamily:"'IBM Plex Mono',monospace"}},it.n+' ครั้ง')),
+            h('div',null,h('span',{style:{color:this.MUTE}},'รวมได้ '),h('b',{style:{fontFamily:"'IBM Plex Mono',monospace",color:it.extra?this.TRACK.await.c:this.INK}},it.extra+' ใบ')),
+            h('div',null,h('span',{style:{color:this.MUTE}},'ทุกๆ '),h('b',{style:{fontFamily:"'IBM Plex Mono',monospace"}},it.avgGap+' วัน')),
+            h('div',null,h('span',{style:{color:this.MUTE}},'เฉลี่ย '),h('b',{style:{fontFamily:"'IBM Plex Mono',monospace"}},'฿'+this.fmtN(it.avgVal)))),
+          tagPills(it,true))
+      : h('div',{key:it.key,onClick:()=>this.setState({rpSel:it.key}),
+          style:{display:'grid',gridTemplateColumns:COLS,padding:'11px 18px',borderBottom:'1px solid #f0f3f3',fontSize:12.5,alignItems:'center',cursor:'pointer',background:'#fff'},
+          onMouseEnter:e=>e.currentTarget.style.background='#f8fafa',onMouseLeave:e=>e.currentTarget.style.background='#fff'},
+          h('div',{style:{minWidth:0,paddingRight:12}},
+            h('div',{style:{color:this.INK,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},it.desc||it.no),
+            h('div',{style:{fontSize:10.5,color:this.MUTE,fontFamily:"'IBM Plex Mono',monospace",marginTop:1}},it.no+' · '+(it.vendorCount>1? it.vendorCount+' ผู้ขาย':(it.topVendor||'').slice(0,28)))),
+          h('div',{style:{textAlign:'right',fontFamily:"'IBM Plex Mono',monospace",fontWeight:700,color:this.INK}},this.fmtN(it.n)),
+          h('div',{style:{textAlign:'right',fontFamily:"'IBM Plex Mono',monospace",fontWeight:600,color:it.extra?this.TRACK.await.c:'#c2cdcf'}},it.extra?this.fmtN(it.extra):'—'),
+          h('div',{style:{textAlign:'right',fontFamily:"'IBM Plex Mono',monospace",color:this.MUTE}},it.avgGap?this.fmtN(it.avgGap):'—'),
+          h('div',{style:{textAlign:'right',fontFamily:"'IBM Plex Mono',monospace",color:this.INK}},this.fmtN(it.avgVal)),
+          h('div',{style:{textAlign:'right',fontFamily:"'IBM Plex Mono',monospace",fontWeight:600,color:this.INK}},this.fmtN(it.val)),
+          tagPills(it));
+    return this.card(h('div',null,
+      h('div',{style:{padding:R.isMobile?'14px':'16px 18px',borderBottom:'1px solid '+this.LINE,display:'flex',alignItems:'center',gap:R.isMobile?10:14,flexWrap:'wrap'}},
+        h('div',{style:{fontSize:15,fontWeight:700}},'สินค้าที่สั่งซื้อซ้ำ'),
+        h('div',{style:{display:'flex',gap:6,flexWrap:'wrap'}},
+          chip('all','ทั้งหมด'), chip('contract',TM.contract.label,TM.contract.c),
+          chip('reorder',TM.reorder.label,TM.reorder.c), chip('split',TM.split.label,TM.split.c)),
+        h('div',{style:{flex:1}}),
+        h('select',{value:this.state.rpSort,onChange:e=>this.setState({rpSort:e.target.value,rpPage:0}),
+          style:{padding:'7px 9px',border:'1px solid '+this.LINE,borderRadius:8,fontSize:12.5,color:this.INK,background:'#fff',cursor:'pointer',outline:'none'}},
+          [sortBtn('n','เรียง: สั่งบ่อยสุด'),sortBtn('extra','เรียง: รวมใบได้มากสุด'),sortBtn('val','เรียง: มูลค่ารวมสูงสุด'),sortBtn('gap','เรียง: สั่งถี่สุด (วัน)'),sortBtn('avgVal','เรียง: มูลค่าต่อใบต่ำสุด')]),
+        h('button',{onClick:()=>this.exportRepeatExcel(),style:{display:'flex',alignItems:'center',gap:6,padding:'7px 13px',border:'1px solid '+this.LINE,background:'#fff',borderRadius:8,fontSize:12.5,color:this.TRACK.full.c,cursor:'pointer',fontWeight:600}},'⬇ Excel'),
+        h('button',{onClick:()=>this.setState({printOpen:true}),style:{display:'flex',alignItems:'center',gap:6,padding:'7px 13px',border:'1px solid '+this.LINE,background:'#fff',borderRadius:8,fontSize:12.5,color:this.INK,cursor:'pointer',fontWeight:500}},'🖨 พิมพ์')),
+      head,
+      view.length? view.map(row) : h('div',{style:{padding:'44px',textAlign:'center',color:this.MUTE,fontSize:13}},'ไม่พบสินค้าที่ตรงกับเงื่อนไข'),
+      h('div',{style:{padding:'12px 18px',borderTop:'1px solid '+this.LINE,display:'flex',alignItems:'center',justifyContent:'space-between',gap:12,flexWrap:'wrap'}},
+        h('div',{style:{fontSize:12.5,color:this.MUTE}},'แสดง ',h('b',{style:{color:this.INK,fontFamily:"'IBM Plex Mono',monospace"}},arr.length?(pg*per+1):0),'–',h('b',{style:{color:this.INK,fontFamily:"'IBM Plex Mono',monospace"}},Math.min((pg+1)*per,arr.length)),' / ',h('b',{style:{color:this.INK,fontFamily:"'IBM Plex Mono',monospace"}},this.fmtN(arr.length)),' รายการ'),
+        h('div',{style:{display:'flex',alignItems:'center',gap:4}},
+          this.pgBtn('‹',pg<=0,()=>this.setState({rpPage:pg-1})),
+          h('div',{style:{fontSize:12.5,color:this.MUTE,padding:'0 10px',fontFamily:"'IBM Plex Mono',monospace"}},(pg+1)+' / '+pages),
+          this.pgBtn('›',pg>=pages-1,()=>this.setState({rpPage:pg+1}))))
+    ),{overflow:'hidden'});
+  }
+
+  repeatLegend(){
+    const h=React.createElement; const TM=this.TAGMETA(); const R=this.R;
+    return this.card(h('div',{style:{padding:R.isMobile?'14px':'16px 18px'}},
+      this.secTitle('ความหมายของสัญญาณ'),
+      h('div',{style:{display:'grid',gridTemplateColumns:R.isMobile?'1fr':'repeat(3,1fr)',gap:12}},
+        ['contract','reorder','split'].map(k=> h('div',{key:k,style:{display:'flex',gap:10,alignItems:'flex-start'}},
+          h('span',{style:{padding:'3px 9px',borderRadius:20,background:TM[k].bg,color:TM[k].c,fontSize:10.5,fontWeight:700,whiteSpace:'nowrap',flexShrink:0}},TM[k].short),
+          h('div',{style:{minWidth:0}},
+            h('div',{style:{fontSize:12.5,fontWeight:600,color:this.INK,marginBottom:2}},TM[k].label),
+            h('div',{style:{fontSize:11.5,color:this.MUTE,lineHeight:1.5}},TM[k].hint)))))
+    ),{marginBottom:14});
+  }
+
+  repeatDrill(){
+    const h=React.createElement; const R=this.R; const TM=this.TAGMETA();
+    const it=this.repeatStats().items.find(x=>x.key===this.state.rpSel); if(!it) return null;
+    const close=()=>this.setState({rpSel:null});
+    // group by month for the mini timeline
+    const bym={}; it.pos.forEach(p=>{ if(p.ym)(bym[p.ym]=bym[p.ym]||[]).push(p); });
+    const months=Object.keys(bym).sort(); const maxN=Math.max(...months.map(m=>bym[m].length),1);
+    const info=(l,v,c)=> h('div',null, h('div',{style:{fontSize:11,color:this.MUTE,marginBottom:3}},l),
+      h('div',{style:{fontSize:14,fontWeight:700,fontFamily:"'IBM Plex Mono',monospace",color:c||this.INK}},v));
+    return h('div',{onClick:close,style:{position:'fixed',inset:0,background:'rgba(18,32,38,.42)',zIndex:55,display:'flex',justifyContent:'center',alignItems:'flex-start',padding:R.isMobile?'0':'40px 20px',overflowY:'auto',animation:'overlayIn .15s ease'}},
+      h('div',{onClick:e=>e.stopPropagation(),style:{background:'#fff',borderRadius:R.isMobile?0:16,width:'100%',maxWidth:880,minHeight:R.isMobile?'100vh':'auto',boxShadow:'0 24px 60px rgba(10,25,30,.28)',animation:'sheetIn .22s cubic-bezier(.2,.7,.3,1)',overflow:'hidden'}},
+        h('div',{style:{padding:R.isMobile?'16px 18px':'20px 24px',borderBottom:'1px solid '+this.LINE,display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:14,position:R.isMobile?'sticky':'static',top:0,background:'#fff',zIndex:2}},
+          h('div',{style:{minWidth:0}},
+            h('div',{style:{fontSize:R.isMobile?15:17,fontWeight:700,marginBottom:4,lineHeight:1.3}},it.desc||it.no),
+            h('div',{style:{fontSize:12,color:this.MUTE,fontFamily:"'IBM Plex Mono',monospace",marginBottom:7}},it.no+(it.unit?' · '+it.unit:'')),
+            h('div',{style:{display:'flex',gap:5,flexWrap:'wrap'}}, it.tags.map(t=>h('span',{key:t,style:{padding:'3px 9px',borderRadius:20,background:TM[t].bg,color:TM[t].c,fontSize:11,fontWeight:600}},TM[t].label)))),
+          h('button',{onClick:close,style:{border:'1px solid '+this.LINE,background:'#fff',width:34,height:34,borderRadius:9,cursor:'pointer',fontSize:16,color:this.MUTE,flexShrink:0}},'✕')),
+        h('div',{style:{padding:R.isMobile?'16px 18px':'18px 24px',display:'grid',gridTemplateColumns:'repeat('+(R.isMobile?3:6)+',1fr)',gap:14,borderBottom:'1px solid '+this.LINE,background:'#fafbfb'}},
+          info('สั่งซ้ำ',it.n+' ครั้ง'), info('รวมใบได้',it.extra+' ใบ',it.extra?this.TRACK.await.c:null),
+          info('ทุกๆ',it.avgGap+' วัน'), info('เฉลี่ย/ใบ','฿'+this.fmtN(it.avgVal)),
+          info('มูลค่ารวม','฿'+this.fmtN(it.val)), info('ผู้ขาย',it.vendorCount+' ราย')),
+        it.splitMonths? h('div',{style:{padding:'12px 24px',background:this.REDBG,borderBottom:'1px solid '+this.LINE,fontSize:12.5,color:this.RED,lineHeight:1.55}},
+          h('b',null,'⚠ เข้าข่ายซอยใบสั่งซื้อ: '),'พบ ',h('b',null,it.splitMonths),' เดือนที่ออกใบตั้งแต่ 3 ใบขึ้นไป โดยแต่ละใบต่ำกว่าวงเงิน ฿'+this.fmtN(this.splitThreshold())+' แต่รวมกันเกินวงเงิน (',it.splitDocs,' ใบ) — ควรตรวจสอบเหตุผลประกอบ'):null,
+        h('div',{style:{padding:R.isMobile?'14px 18px':'16px 24px',borderBottom:'1px solid '+this.LINE}},
+          h('div',{style:{fontSize:11.5,fontWeight:600,color:this.MUTE,textTransform:'uppercase',letterSpacing:.5,marginBottom:11}},'ความถี่รายเดือน'),
+          h('div',{style:{display:'flex',alignItems:'flex-end',gap:3,height:74,overflowX:'auto'}},
+            months.map(m=>{ const n=bym[m].length; const rep=n>1;
+              return h('div',{key:m,title:m+' · '+n+' ใบ',style:{flex:'1 0 auto',minWidth:14,display:'flex',flexDirection:'column',alignItems:'center',gap:3}},
+                h('div',{style:{fontSize:9,fontFamily:"'IBM Plex Mono',monospace",color:rep?this.TRACK.await.c:this.MUTE,fontWeight:rep?700:400}},n),
+                h('div',{style:{width:'70%',maxWidth:16,height:(n/maxN*44)+'px',minHeight:3,background:rep?this.TRACK.await.c:this.TEAL,borderRadius:'3px 3px 0 0'}}),
+                h('div',{style:{fontSize:8.5,color:this.MUTE,fontFamily:"'IBM Plex Mono',monospace",whiteSpace:'nowrap'}},m.slice(2).replace('-','/')));
+            })),
+          h('div',{style:{marginTop:8,fontSize:11,color:this.MUTE}},'แท่งสีเหลือง = เดือนที่ออกใบซ้ำมากกว่า 1 ใบ (รวมเป็นใบเดียวได้)')),
+        h('div',{style:{padding:R.isMobile?'14px 18px 22px':'16px 24px 22px'}},
+          h('div',{style:{fontSize:11.5,fontWeight:600,color:this.MUTE,textTransform:'uppercase',letterSpacing:.5,marginBottom:10}},'ใบสั่งซื้อทั้งหมด ('+it.n+' ใบ)'),
+          h('div',{style:{border:'1px solid '+this.LINE,borderRadius:10,overflow:'hidden'}},
+            h('div',{style:{overflowX:'auto',maxHeight:340,overflowY:'auto'}}, h('div',{style:{minWidth:R.isMobile?540:'auto'}},
+              h('div',{style:{display:'grid',gridTemplateColumns:'112px 96px minmax(0,1fr) 74px 92px 92px',padding:'8px 12px',background:this.PANEL,fontSize:10.5,fontWeight:600,color:this.MUTE,textTransform:'uppercase',position:'sticky',top:0}},
+                h('div',null,'เลขที่ PO'),h('div',null,'วันที่'),h('div',null,'ผู้ขาย'),h('div',{style:{textAlign:'right'}},'จำนวน'),h('div',{style:{textAlign:'right'}},'มูลค่ารายการ'),h('div',{style:{textAlign:'right'}},'มูลค่าทั้งใบ')),
+              it.pos.slice().reverse().map((p,i)=> h('div',{key:i,onClick:()=>this.setState({sel:p.doc,rpSel:null,view:'main'}),
+                style:{display:'grid',gridTemplateColumns:'112px 96px minmax(0,1fr) 74px 92px 92px',padding:'9px 12px',borderTop:'1px solid #f0f3f3',fontSize:12,alignItems:'center',cursor:'pointer'},
+                onMouseEnter:e=>e.currentTarget.style.background='#f8fafa',onMouseLeave:e=>e.currentTarget.style.background='transparent'},
+                h('div',{style:{fontFamily:"'IBM Plex Mono',monospace",fontWeight:600,color:this.INK}},p.doc),
+                h('div',{style:{fontFamily:"'IBM Plex Mono',monospace",fontSize:11,color:this.MUTE}},this.fdate(p.post)),
+                h('div',{style:{paddingRight:8,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',color:this.INK}},p.vn),
+                h('div',{style:{textAlign:'right',fontFamily:"'IBM Plex Mono',monospace"}},this.fmtN(p.qty)),
+                h('div',{style:{textAlign:'right',fontFamily:"'IBM Plex Mono',monospace"}},this.fmtN(p.lineVal)),
+                h('div',{style:{textAlign:'right',fontFamily:"'IBM Plex Mono',monospace",color:p.ln===1?this.INK:this.MUTE,fontWeight:p.ln===1?600:400}},this.fmtN(p.poVal)))))),
+          h('div',{style:{marginTop:9,fontSize:11,color:this.MUTE}},'แตะแถวเพื่อเปิดรายละเอียดใบสั่งซื้อ · ',h('b',{style:{color:this.INK}},it.single),' ใบ จาก ',it.n,' ใบ มีรายการเดียวทั้งใบ')))
+      ));
+  }
+
+  exportRepeatExcel(){
+    if(!window.XLSXWrite){ this.setState({toast:'ตัวส่งออก Excel ยังไม่พร้อม'}); clearTimeout(this._tt); this._tt=setTimeout(()=>this.setState({toast:''}),3000); return; }
+    const arr=this.rpFiltered(); const TM=this.TAGMETA();
+    const cols=[
+      {header:'รหัสสินค้า',key:'no',width:14},{header:'รายการ',key:'desc',width:40},{header:'หน่วย',key:'unit',width:10},
+      {header:'จำนวนครั้งที่สั่ง',key:'n',num:true,width:13},{header:'ใบที่รวมได้',key:'extra',num:true,width:11},
+      {header:'เดือนที่สั่งซ้ำ',key:'repMonths',num:true,width:12},{header:'ระยะห่างเฉลี่ย (วัน)',key:'avgGap',num:true,width:15},
+      {header:'มูลค่าเฉลี่ย/ใบ',key:'avgVal',num:true,width:14},{header:'มูลค่ารวม',key:'val',num:true,width:15},
+      {header:'จำนวนที่สั่งรวม',key:'qty',num:true,width:13},{header:'จำนวนผู้ขาย',key:'vendorCount',num:true,width:11},
+      {header:'ผู้ขายหลัก',key:'topVendor',width:32},{header:'แผนกหลัก',key:'dept',width:12},
+      {header:'ใบที่มีรายการเดียว',key:'single',num:true,width:14},
+      {header:'เดือนเข้าข่ายซอยใบ',key:'splitMonths',num:true,width:15},
+      {header:'สัญญาณ',key:'tags',width:26},
+      {header:'สั่งครั้งแรก',key:'first',width:12},{header:'สั่งล่าสุด',key:'last',width:12}
+    ];
+    const data=arr.map(i=>({ no:i.no, desc:i.desc, unit:i.unit, n:i.n, extra:i.extra, repMonths:i.repMonths,
+      avgGap:i.avgGap, avgVal:Math.round(i.avgVal), val:i.val, qty:i.qty, vendorCount:i.vendorCount,
+      topVendor:i.topVendor, dept:i.dept, single:i.single, splitMonths:i.splitMonths,
+      tags:i.tags.map(t=>TM[t].label).join(', '), first:this.fdate(i.first), last:this.fdate(i.last) }));
+    try{
+      const blob=window.XLSXWrite.build(cols,data,'Repeat Purchase');
+      const d=new Date(); const fn='PO_RepeatPurchase_'+d.getFullYear()+String(d.getMonth()+1).padStart(2,'0')+String(d.getDate()).padStart(2,'0')+'.xlsx';
+      window.XLSXWrite.download(blob,fn);
+      this.setState({toast:'ส่งออก Excel '+this.fmtN(arr.length)+' รายการแล้ว'});
+    }catch(e){ this.setState({toast:'ส่งออกไม่สำเร็จ: '+(e.message||e)}); }
+    clearTimeout(this._tt); this._tt=setTimeout(()=>this.setState({toast:''}),3800);
+  }
+
+  printRepeat(){
+    const h=React.createElement; const TM=this.TAGMETA();
+    const arr=this.rpFiltered(); const cap=800; const truncated=arr.length>cap; const show=truncated?arr.slice(0,cap):arr;
+    const S=this.repeatStats(); const f=this.state.f;
+    const close=()=>this.setState({printOpen:false});
+    const fl={prefix:'ชุดเอกสาร',vendor:'ผู้ขาย',wh:'คลัง',dept:'แผนก',person:'ผู้รับผิดชอบ'}; const fchips=[];
+    Object.keys(fl).forEach(k=>{ if(f[k]) fchips.push(fl[k]+': '+f[k]); });
+    if(f.from||f.to) fchips.push('วันที่ '+(f.from||'…')+' – '+(f.to||'…'));
+    const tagName={all:'ทั้งหมด',contract:'ควรทำสัญญา',reorder:'ตั้งจุดสั่งซื้อ',split:'เสี่ยงซอยใบ'}[this.state.rpTag];
+    const th=(t,al)=>h('th',{style:{border:'1px solid #c9d3d6',padding:'4px 6px',textAlign:al||'left',background:'#eef3f4',fontWeight:600,whiteSpace:'nowrap'}},t);
+    const td=(v,al,mono,color)=>h('td',{style:{border:'1px solid #d8e0e2',padding:'3px 6px',textAlign:al||'left',fontFamily:mono?"'IBM Plex Mono',monospace":'inherit',color:color||'#16242b'}},v);
+    const kpi=(label,val,color)=>h('div',{style:{border:'1px solid #d8e0e2',borderRadius:8,padding:'8px 11px',minWidth:130}},
+      h('div',{style:{fontSize:10,color:'#64777d',marginBottom:3}},label), h('div',{style:{fontSize:17,fontWeight:700,fontFamily:"'IBM Plex Mono',monospace",color:color||'#16242b'}},val));
+    return h('div',{id:'print-report',style:{background:'#fff',minHeight:'100vh'}},
+      h('div',{className:'no-print',style:{position:'sticky',top:0,display:'flex',justifyContent:'space-between',alignItems:'center',gap:12,padding:'12px 18px',borderBottom:'1px solid '+this.LINE,background:'#fff',zIndex:2,flexWrap:'wrap'}},
+        h('div',{style:{fontSize:13,color:this.MUTE}},'ตัวอย่างก่อนพิมพ์ · ',h('b',{style:{color:this.INK}},this.fmtN(arr.length)),' รายการ', truncated?h('span',{style:{color:this.RED}},'  (พิมพ์ '+cap+' แรก)'):null),
+        h('div',{style:{display:'flex',gap:9,flexWrap:'wrap'}},
+          h('button',{onClick:()=>this.exportRepeatExcel(),style:{padding:'9px 16px',border:'1px solid '+this.LINE,borderRadius:9,background:'#fff',color:this.TRACK.full.c,fontSize:13,fontWeight:600,cursor:'pointer'}},'⬇ Export Excel'),
+          h('button',{onClick:()=>window.print(),style:{padding:'9px 18px',border:'none',borderRadius:9,background:this.TEAL,color:'#fff',fontSize:13,fontWeight:600,cursor:'pointer'}},'🖨 พิมพ์ / บันทึก PDF'),
+          h('button',{onClick:close,style:{padding:'9px 16px',border:'1px solid '+this.LINE,background:'#fff',borderRadius:9,fontSize:13,color:this.INK,cursor:'pointer'}},'ปิด'))),
+      h('div',{style:{padding:'22px 26px',maxWidth:1180,margin:'0 auto',color:'#16242b'}},
+        h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:16,borderBottom:'2px solid '+this.INK,paddingBottom:12,marginBottom:14}},
+          h('div',null,
+            h('div',{style:{fontSize:19,fontWeight:700}},'รายงานวิเคราะห์การสั่งซื้อซ้ำ'),
+            h('div',{style:{fontSize:12.5,color:this.MUTE,marginTop:3}},'โรงพยาบาลธรรมศาสตร์เฉลิมพระเกียรติ · วิเคราะห์ระดับรายสินค้า · เกณฑ์รวมใบ: ภายในเดือนเดียวกัน'),
+            h('div',{style:{fontSize:12,color:this.MUTE,marginTop:2}},'มุมมอง: ',h('b',{style:{color:this.INK}},tagName), fchips.length?' · '+fchips.join(' · '):' · ไม่มีตัวกรอง')),
+          h('div',{style:{textAlign:'right',fontSize:11.5,color:this.MUTE,lineHeight:1.6}},
+            h('div',null,'วงเงินอ้างอิง ',h('b',{style:{color:this.INK,fontFamily:"'IBM Plex Mono',monospace"}},'฿'+this.fmtN(this.splitThreshold()))),
+            h('div',null,'พิมพ์เมื่อ ',h('b',{style:{color:this.INK,fontFamily:"'IBM Plex Mono',monospace"}},new Date().toLocaleString('th-TH'))))),
+        h('div',{style:{display:'flex',flexWrap:'wrap',gap:10,marginBottom:16}},
+          kpi('สินค้าที่สั่งซ้ำ',this.fmtN(S.items.length)+' รายการ'),
+          kpi('ใบสั่งซื้อที่รวมได้',this.fmtN(S.mergeDocs)+' ใบ',this.TRACK.await.c),
+          kpi('เข้าข่ายซอยใบ',this.fmtN(S.items.filter(i=>i.splitMonths>0).length)+' รายการ',this.RED),
+          kpi('ควรทำสัญญา',this.fmtN(S.items.filter(i=>i.tags.indexOf('contract')>=0).length)+' รายการ',this.TRACK.partial.c),
+          kpi('PO รายการเดียว',this.fmtN(S.singlePO)+' ใบ')),
+        h('table',{style:{width:'100%',borderCollapse:'collapse',fontSize:10.5}},
+          h('thead',null,h('tr',null,th('#'),th('รหัส'),th('รายการ'),th('สั่งซ้ำ','right'),th('รวมได้','right'),th('ทุกๆ(วัน)','right'),th('เฉลี่ย/ใบ','right'),th('มูลค่ารวม','right'),th('ผู้ขาย','right'),th('ผู้ขายหลัก'),th('สัญญาณ'))),
+          h('tbody',null, show.map((i,idx)=> h('tr',{key:i.key,className:'pr-row'},
+            td(idx+1,'right',true), td(i.no,'left',true), td((i.desc||'').slice(0,44)),
+            td(this.fmtN(i.n),'right',true), td(i.extra?this.fmtN(i.extra):'—','right',true,i.extra?this.TRACK.await.c:null),
+            td(i.avgGap?this.fmtN(i.avgGap):'—','right',true), td(this.fmtN(i.avgVal),'right',true),
+            td(this.fmtN(i.val),'right',true), td(i.vendorCount,'right',true), td((i.topVendor||'').slice(0,26)),
+            td(i.tags.map(t=>TM[t].short).join(', ')||'—','left',false,i.splitMonths?this.RED:null))))),
+        h('div',{style:{marginTop:14,fontSize:10.5,color:this.MUTE,display:'flex',justifyContent:'space-between'}},
+          h('div',null,'รวม ',h('b',null,this.fmtN(show.length)),' รายการ · สัญญาณ: สัญญา = สั่งซ้ำ ≥12 ครั้ง · สต๊อก = รอบสั่งสม่ำเสมอ · ซอยใบ = เดือนเดียว ≥3 ใบ ต่ำกว่าวงเงินทุกใบ'),
+          h('div',null,'ระบบติดตามสถานะใบสั่งซื้อ'))));
+  }
+
   // ---------- bottom nav (mobile app shell) ----------
   scrollToEl(el){ if(el){ const y=el.getBoundingClientRect().top + window.pageYOffset - 8; window.scrollTo({top:Math.max(0,y),behavior:'smooth'}); } }
   navItem(icon,label,onClick,accent){
@@ -758,13 +1098,13 @@ class Component extends DCLogic {
     const h=React.createElement;
     return h('div',{style:{position:'fixed',left:0,right:0,bottom:0,zIndex:40,background:'rgba(255,255,255,.94)',backdropFilter:'blur(10px)',WebkitBackdropFilter:'blur(10px)',borderTop:'1px solid '+this.LINE,boxShadow:'0 -2px 12px rgba(20,40,50,.06)',paddingBottom:'var(--safe-b)'}},
       h('div',{style:{display:'flex',alignItems:'stretch',height:56,paddingLeft:'var(--safe-l)',paddingRight:'var(--safe-r)'}},
-        this.navItem('▤','ภาพรวม',()=>window.scrollTo({top:0,behavior:'smooth'})),
-        this.navItem('⚲','ตัวกรอง',()=>{ this.setState({filterOpen:true}); setTimeout(()=>this.scrollToEl(this._elFilter),60); }),
+        this.navItem('▤','ภาพรวม',()=>{ this.setState({view:'main'}); window.scrollTo({top:0,behavior:'smooth'}); }, this.state.view==='main'),
+        this.navItem('↻','ซื้อซ้ำ',()=>{ this.setState({view:'repeat',rpPage:0}); window.scrollTo({top:0,behavior:'smooth'}); }, this.state.view==='repeat'),
         // center upload FAB
         h('button',{onClick:()=>this.setState({upOpen:true}),style:{flex:'0 0 auto',width:58,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'flex-start',border:'none',background:'transparent',cursor:'pointer',padding:0,position:'relative'}},
           h('span',{style:{position:'absolute',top:-16,width:48,height:48,borderRadius:'50%',background:this.TEAL,color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',fontSize:22,fontWeight:700,boxShadow:'0 4px 12px rgba(15,124,128,.4)'}},'↑'),
           h('span',{style:{marginTop:36,fontSize:10,fontWeight:600,color:this.TEAL}},'อัปโหลด')),
-        this.navItem('☰','รายการ',()=>this.scrollToEl(this._elTable)),
+        this.navItem('⚲','ตัวกรอง',()=>{ this.setState({filterOpen:true}); setTimeout(()=>this.scrollToEl(this._elFilter),60); }),
         this.navItem('🖨','พิมพ์',()=>this.setState({printOpen:true})))
     );
   }
