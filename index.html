@@ -123,6 +123,7 @@ class Component extends DCLogic {
   unitM(n){ return Math.abs(n||0)>=1e6?'ล้านบาท':'บาท'; }
   baht(n){ return '฿'+this.fmtN(n); }
   dnum(s){ if(!s) return 0; const p=String(s).split('.'); if(p.length!==3) return 0; const[d,m,y]=p.map(Number); return (2000+y)*10000+m*100+d; }
+  dts(s){ if(!s) return 0; const p=String(s).split('.'); if(p.length!==3) return 0; const[d,m,y]=p.map(Number); return new Date(2000+y,m-1,d).getTime(); }
   fdate(s){ if(!s) return '—'; const p=String(s).split('.'); if(p.length!==3) return s; return p[0]+'/'+p[1]+'/'+(2000+Number(p[2])); }
   inpNum(s){ return s? Number(s.replace(/-/g,'')) : 0; }
 
@@ -783,7 +784,7 @@ class Component extends DCLogic {
       for(const it of (r.items||[])){
         const key=it.no||it.desc; if(!key||seen.has(key)) continue; seen.add(key);
         const e=map[key]||(map[key]={no:it.no,desc:it.desc,unit:it.unit,pos:[],val:0,qty:0,vendors:{},depts:{},single:0});
-        e.pos.push({doc:r.doc,post:r.post,t:this.dnum(r.post),ym:this.ymOf(r.post),qty:it.qty,lineVal:it.total,poVal:r.val,vn:r.vn,dept:r.dept,wh:r.wh,ln:r.ln,tr:r.tr});
+        e.pos.push({doc:r.doc,post:r.post,t:this.dts(r.post),ym:this.ymOf(r.post),qty:it.qty,lineVal:it.total,poVal:r.val,vn:r.vn,dept:r.dept,wh:r.wh,ln:r.ln,tr:r.tr});
         e.val+=it.total; e.qty+=it.qty;
         e.vendors[r.vn]=(e.vendors[r.vn]||0)+1;
         if(r.dept) e.depts[r.dept]=(e.depts[r.dept]||0)+1;
@@ -1005,7 +1006,27 @@ class Component extends DCLogic {
                 h('div',{style:{paddingRight:8,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',color:this.INK}},p.vn),
                 h('div',{style:{textAlign:'right',fontFamily:"'IBM Plex Mono',monospace"}},this.fmtN(p.qty)),
                 h('div',{style:{textAlign:'right',fontFamily:"'IBM Plex Mono',monospace"}},this.fmtN(p.lineVal)),
-                h('div',{style:{textAlign:'right',fontFamily:"'IBM Plex Mono',monospace",color:p.ln===1?this.INK:this.MUTE,fontWeight:p.ln===1?600:400}},this.fmtN(p.poVal)))))),
+                h('div',{style:{textAlign:'right',fontFamily:"'IBM Plex Mono',monospace",color:p.ln===1?this.INK:this.MUTE,fontWeight:p.ln===1?600:400}},this.fmtN(p.poVal))))),
+              h('div',{style:{display:'grid',gridTemplateColumns:'112px 96px minmax(0,1fr) 74px 92px 92px',padding:'11px 12px',borderTop:'2px solid '+this.INK,background:this.PANEL,fontSize:12.5,alignItems:'center',position:'sticky',bottom:0}},
+                h('div',{style:{fontWeight:700,color:this.INK}},'รวม'),
+                h('div',{style:{fontSize:11,color:this.MUTE}},it.n+' ใบ'),
+                h('div',{style:{fontSize:11,color:this.MUTE,paddingRight:8}},it.vendorCount>1? it.vendorCount+' ผู้ขาย':(it.topVendor||'').slice(0,26)),
+                h('div',{style:{textAlign:'right',fontFamily:"'IBM Plex Mono',monospace",fontWeight:700,color:this.INK}},this.fmtN(it.qty)),
+                h('div',{style:{textAlign:'right',fontFamily:"'IBM Plex Mono',monospace",fontWeight:700,color:this.TEAL}},this.fmtN(it.val)),
+                h('div',{style:{textAlign:'right',fontFamily:"'IBM Plex Mono',monospace",color:'#c2cdcf',fontSize:11}},'—'))),
+          h('div',{style:{marginTop:10,display:'flex',gap:10,flexWrap:'wrap'}},
+            h('div',{style:{flex:'1 1 190px',border:'1px solid '+this.LINE,borderRadius:10,padding:'11px 13px',background:'#fafbfb'}},
+              h('div',{style:{fontSize:11,color:this.MUTE,marginBottom:4}},'มูลค่ารวมของสินค้านี้'),
+              h('div',{style:{fontSize:19,fontWeight:700,fontFamily:"'IBM Plex Mono',monospace",color:this.TEAL}},'฿'+this.fmtN(it.val)),
+              h('div',{style:{fontSize:10.5,color:this.MUTE,marginTop:3}},'เฉพาะบรรทัดของสินค้านี้ · ไม่รวมสินค้าอื่นในใบเดียวกัน')),
+            h('div',{style:{flex:'1 1 190px',border:'1px solid '+this.LINE,borderRadius:10,padding:'11px 13px',background:'#fafbfb'}},
+              h('div',{style:{fontSize:11,color:this.MUTE,marginBottom:4}},'จำนวนที่สั่งรวม'),
+              h('div',{style:{fontSize:19,fontWeight:700,fontFamily:"'IBM Plex Mono',monospace",color:this.INK}},this.fmtN(it.qty)+(it.unit?' '+it.unit:'')),
+              h('div',{style:{fontSize:10.5,color:this.MUTE,marginTop:3}},'เฉลี่ย '+this.fmtN(it.qty/it.n)+' ต่อใบ')),
+            h('div',{style:{flex:'1 1 190px',border:'1px solid '+this.LINE,borderRadius:10,padding:'11px 13px',background:'#fafbfb'}},
+              h('div',{style:{fontSize:11,color:this.MUTE,marginBottom:4}},'ราคาต่อหน่วยเฉลี่ย'),
+              h('div',{style:{fontSize:19,fontWeight:700,fontFamily:"'IBM Plex Mono',monospace",color:this.INK}},'฿'+this.fmtN(it.qty? it.val/it.qty : 0)),
+              h('div',{style:{fontSize:10.5,color:this.MUTE,marginTop:3}},'มูลค่ารวม ÷ จำนวนรวม'))),
           h('div',{style:{marginTop:9,fontSize:11,color:this.MUTE}},'แตะแถวเพื่อเปิดรายละเอียดใบสั่งซื้อ · ',h('b',{style:{color:this.INK}},it.single),' ใบ จาก ',it.n,' ใบ มีรายการเดียวทั้งใบ')))
       ));
   }
